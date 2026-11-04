@@ -1,0 +1,19 @@
+# Журналы работы программы
+logs/
+*.log
+
+# Результаты сборки (EXE собирается build.bat и раздаётся через Releases)
+OktellWatch.exe
+*.pdb
+
+# Visual Studio / Rider / временные файлы
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*~
+
+# Системные файлы
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,14 @@
+# Нормализация окончаний строк
+* text=auto
+
+# Файлы Windows — всегда CRLF в рабочей копии
+*.cs   text eol=crlf
+*.bat  text eol=crlf
+*.ini  text eol=crlf
+*.md   text eol=crlf
+
+# Двоичные файлы — не трогать
+*.exe binary
+*.zip binary
+*.wav binary
+*.png binary
