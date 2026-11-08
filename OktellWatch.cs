@@ -129,6 +129,34 @@ namespace OktellWatch
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
+        // Перечисление дочерних окон — уже объявлено выше (EnumChildWindows
+        // с делегатом EnumProc), здесь только поиск видимых кнопок в форме.
+        // Есть ли в окне хотя бы одна видимая кнопка (класс содержит BUTTON/BTN:
+        // Win32 Button, WinForms WindowsForms10.BUTTON..., VCL TButton/TBitBtn).
+        // Окно дозвона и прочие «информационные» окна кнопок не имеют — оператор
+        // не может на них отреагировать, поэтому правило с btn:true их игнорирует.
+        public static bool HasButtonChildren(IntPtr h)
+        {
+            if (h == IntPtr.Zero || !IsWindow(h)) return false;
+            bool found = false;
+            EnumChildWindows(h, delegate(IntPtr ch, IntPtr lp)
+            {
+                try
+                {
+                    if (IsWindowVisible(ch))
+                    {
+                        StringBuilder cls = new StringBuilder(256);
+                        GetClassName(ch, cls, 256);
+                        string c = cls.ToString().ToLowerInvariant();
+                        if (c.Contains("button") || c.Contains("btn")) { found = true; return false; }
+                    }
+                }
+                catch { }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
         public static void EnableDpiAware()
         {
             try { SetProcessDPIAware(); } catch { }
@@ -198,6 +226,8 @@ namespace OktellWatch
         public string Title = "";
         public string ProcessName = "";
         public int Pid;
+        public bool HasButtons;  // есть видимая кнопка среди дочерних окон (заполняет Collector)
+        public bool BtnChecked;  // кнопки уже проверены в этом проходе Collect
 
         public string Describe()
         {
@@ -225,6 +255,7 @@ namespace OktellWatch
         public string Scope = "top";
         public string Raw = "";
         public bool Enabled = true;   // false = правило отключено (off=true)
+        public bool RequireButtons;  // btn:true — в окне должна быть видимая кнопка
 
         public static WatchRule Parse(string raw)
         {
@@ -253,6 +284,11 @@ namespace OktellWatch
                 else if (k == "proc!") r.NotProc = v;
                 else if (k == "title!") r.NotTitle = v;
                 else if (k == "class!") r.NotClass = v;
+                else if (k == "btn")
+                {
+                    string bv = v.ToLowerInvariant();
+                    r.RequireButtons = (bv == "1" || bv == "true" || bv == "on" || bv == "yes");
+                }
                 else if (k == "scope") r.Scope = v.ToLowerInvariant();
                 else if (k == "off")
                 {
@@ -268,6 +304,14 @@ namespace OktellWatch
         }
 
         public bool Matches(WindowInfo w)
+        {
+            if (!MatchesBase(w)) return false;
+            // btn:true: окно без кнопок оператор обработать не может — не цель
+            return !RequireButtons || w.HasButtons;
+        }
+
+        // Все проверки, кроме кнопок (нужно для журнала «пропущено: нет кнопок»)
+        public bool MatchesBase(WindowInfo w)
         {
             if (!Enabled) return false;
             string sc = Str.Lo(Scope);
@@ -291,6 +335,7 @@ namespace OktellWatch
                    (Str.IsEmpty(NotProc) ? "" : " proc!~" + NotProc) +
                    (Str.IsEmpty(NotTitle) ? "" : " title!~" + NotTitle) +
                    (Str.IsEmpty(NotClass) ? "" : " class!~" + NotClass) +
+                   (RequireButtons ? " btn:true" : "") +
                    " scope=" + (Scope == null ? "top" : Scope);
         }
 
@@ -305,6 +350,7 @@ namespace OktellWatch
             if (!Str.IsEmpty(NotProc)) sb.Append("proc!:").Append(NotProc.Trim()).Append(';');
             if (!Str.IsEmpty(NotTitle)) sb.Append("title!:").Append(NotTitle.Trim()).Append(';');
             if (!Str.IsEmpty(NotClass)) sb.Append("class!:").Append(NotClass.Trim()).Append(';');
+            if (RequireButtons) sb.Append("btn:true;");
             sb.Append("scope:").Append(Str.IsEmpty(Scope) ? "top" : Scope.Trim().ToLowerInvariant());
             return sb.ToString();
         }
@@ -331,6 +377,7 @@ namespace OktellWatch
             if (!Str.IsEmpty(NotProc)) p.Add("процесс НЕ ~«" + NotProc.Trim() + "»");
             if (!Str.IsEmpty(NotTitle)) p.Add("заголовок НЕ ~«" + NotTitle.Trim() + "»");
             if (!Str.IsEmpty(NotClass)) p.Add("класс НЕ ~«" + NotClass.Trim() + "»");
+            if (RequireButtons) p.Add("в окне есть кнопки (без кнопок — игнорировать)");
             string sc = Str.Lo(Scope);
             if (sc == "child") p.Add("только вложенные окна");
             else if (sc == "any") p.Add("главные и вложенные окна");
@@ -826,6 +873,13 @@ folder=logs
                     for (int i = 0; i < tops.Count; i++)
                     {
                         WindowInfo wi = tops[i];
+                        // btn:true: окно без кнопок оператор обработать не может —
+                        // не цель; но если остальные приметы совпали — пишем в журнал
+                        if (r.RequireButtons && !CheckButtons(wi))
+                        {
+                            if (r.MatchesBase(wi)) LogSkipButtons(ri, wi);
+                            continue;
+                        }
                         if (r.Matches(wi))
                         {
                             long k = wi.Hwnd.ToInt64();
@@ -852,7 +906,12 @@ folder=logs
                             if (ci != null)
                             {
                                 ci.RootHwnd = top.Hwnd;
-                                if (r.Matches(ci))
+                                bool skip = r.RequireButtons && !CheckButtons(ci);
+                                if (skip)
+                                {
+                                    if (r.MatchesBase(ci)) LogSkipButtons(ri, ci);
+                                }
+                                else if (r.Matches(ci))
                                 {
                                     long k = ch.ToInt64();
                                     if (!found.ContainsKey(k))
@@ -867,6 +926,38 @@ folder=logs
                     }
                 }
             }
+        }
+
+        // Ленивая проверка кнопок окна (один раз на объект окна за проход Collect)
+        private static bool CheckButtons(WindowInfo wi)
+        {
+            if (!wi.BtnChecked)
+            {
+                wi.HasButtons = WinApi.HasButtonChildren(wi.Hwnd);
+                wi.BtnChecked = true;
+            }
+            return wi.HasButtons;
+        }
+
+        // Не спамим в журнал: окно без кнопок живёт долго, а Collect вызывается
+        // и хуком (раз в 250 мс), и опросом — пишем не чаще раза в 15 секунд на окно
+        private static readonly Dictionary<long, int> _btnSkipLogged = new Dictionary<long, int>();
+
+        private static void LogSkipButtons(int ruleNo, WindowInfo wi)
+        {
+            try
+            {
+                long k = wi.Hwnd.ToInt64();
+                int now = Environment.TickCount;
+                int last;
+                if (_btnSkipLogged.TryGetValue(k, out last) &&
+                    unchecked(now - last) >= 0 && unchecked(now - last) < 15000) return;
+                if (_btnSkipLogged.Count > 1000) _btnSkipLogged.Clear();
+                _btnSkipLogged[k] = now;
+                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": окно без кнопок — игнорируется; " +
+                    wi.Describe());
+            }
+            catch { }
         }
     }
 
@@ -1471,6 +1562,9 @@ folder=logs
    proc!:  процесс НЕ должен содержать (исключение, с 1.2)
    title!: заголовок НЕ должен содержать (исключение, с 1.2)
    class!: класс НЕ должен содержать (исключение, с 1.2)
+   btn:    true — в окне должна быть видимая кнопка; окна без кнопок
+           (дозвон после подтверждения и т.п.) игнорируются — оператор
+           всё равно не может на них отреагировать
 • Регистр не важен; совпадение = ВСЕ указанные поля найдены в окне.
 • Исключения (со знаком «!») сужают правило: окно подходит, только
   если исключающая подстрока НЕ найдена. Например, ловим «обратн»,
@@ -1546,6 +1640,7 @@ OktellWatch.exe + config.ini).
         private readonly CheckBox _ckNotProc;
         private readonly CheckBox _ckNotTitle;
         private readonly CheckBox _ckNotClass;
+        private readonly CheckBox _ckButtons;
         private readonly ComboBox _cbScope;
         private readonly Label _lblPreview;
         private readonly bool _wasEnabled;
@@ -1577,6 +1672,17 @@ OktellWatch.exe + config.ini).
             _tbClass = AddField("Класс окна содержит:",
                 seed == null ? "" : Clean(seed.Class),
                 seed != null && !Str.IsEmpty(seed.NotClass), ref y, out _ckNotClass);
+
+            // окна без кнопок (дозвон и т.п.) оператор обработать не может —
+            // с галочкой такие окна правилом игнорируются
+            _ckButtons = new CheckBox();
+            _ckButtons.Text = "В окне должны быть кнопки (окна без кнопок игнорировать)";
+            _ckButtons.AutoSize = true;
+            _ckButtons.Checked = seed != null && seed.RequireButtons;
+            _ckButtons.Location = new Point(14, y + 2);
+            _ckButtons.CheckedChanged += delegate { UpdatePreview(); };
+            Controls.Add(_ckButtons);
+            y += _ckButtons.Height + 8;
 
             Label l4 = new Label();
             l4.Text = "Где искать:";
@@ -1707,6 +1813,7 @@ OktellWatch.exe + config.ini).
                 sb.Append(_ckNotTitle.Checked ? "title!:" : "title:").Append(title).Append(';');
             if (cls.Length > 0)
                 sb.Append(_ckNotClass.Checked ? "class!:" : "class:").Append(cls).Append(';');
+            if (_ckButtons.Checked) sb.Append("btn:true;");
             sb.Append("scope:").Append(ScopeValue());
             return WatchRule.Parse(sb.ToString());
         }
