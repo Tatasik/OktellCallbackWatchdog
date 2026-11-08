@@ -48,7 +48,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("Oktell Watch")]
 [assembly: System.Reflection.AssemblyProduct("Oktell Watch")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
 
 namespace OktellWatch
 {
@@ -101,6 +101,18 @@ namespace OktellWatch
         [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
         [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
         [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+
+        // Подсказка-заполнитель внутри поля ввода (исчезает, когда начат ввод)
+        public const int EM_SETCUEBANNER = 0x1501;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        public static void SetCue(Control c, string text)
+        {
+            try { SendMessage(c.Handle, EM_SETCUEBANNER, (IntPtr)1, text); }
+            catch { }
+        }
 
         // Хук событий окон: мгновенное узнавание о показе нового окна (v1.1)
         public delegate void WinEventDelegate(IntPtr hHook, uint evt, IntPtr hwnd,
@@ -570,6 +582,7 @@ namespace OktellWatch
 ;  Oktell Watch — настройки (кодировка файла: UTF-8)
 ;  Можно править в Блокноте прямо во время работы:
 ;  программа перечитает файл в течение секунды.
+;  Правила удобно вести через меню значка — «Диспетчер правил...».
 ; ============================================================
 
 [watch]
@@ -602,9 +615,11 @@ visibleOnly=true
 ; Основное правило: процесс Oktell, в заголовке окна есть «обратн»
 rule1=proc:oktell;title:обратн;scope:top
 
-; Примеры (включайте через Диспетчер правил или раскомментируйте):
-;rule2=proc:oktell;title:перезвонить;scope:top
-;rule3=proc:oktell;title:обратн;scope:child
+; Примеры (включите галочкой в Диспетчере правил или раскомментируйте):
+;rule2=proc:oktell;title:перезвон;scope:top
+;rule3=proc:oktell;title:заказ звонка;scope:top
+;rule4=proc:oktell;title:забронир;scope:top
+;rule5=proc:oktell;title:обратн;scope:child
 
 ; --- Тонкая настройка (обычно менять не нужно) ---
 ; Реагировать на события показа окон не чаще, чем раз в N мс
@@ -1385,7 +1400,7 @@ folder=logs
         }
 
         public const string HelpText =
-@"ОKTELL WATCH 1.1 — сторож формы обратного звонка
+@"OKTELL WATCH 1.1.1 — сторож формы обратного звонка
 ============================================================
 
 ЗАЧЕМ
@@ -1513,26 +1528,27 @@ OktellWatch.exe + config.ini).
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 9f);
-            ClientSize = new Size(470, 270);
 
+            // Подпись расположена НАД полем ввода и не налезает на него ни при
+            // каком DPI (исправлено в 1.1.1). Примеры показываются внутри
+            // пустых полей — см. OnShown.
             int y = 14;
-            _tbProc = AddField("Процесс содержит (например: oktell):", ref y,
+            _tbProc = AddField("Процесс содержит:", ref y,
                 seed == null ? "" : Clean(seed.Proc));
-            _tbTitle = AddField("Заголовок окна содержит (например: обратн):", ref y,
+            _tbTitle = AddField("Заголовок окна содержит:", ref y,
                 seed == null ? "" : Clean(seed.Title));
-            _tbClass = AddField("Класс окна содержит (можно оставить пустым):", ref y,
+            _tbClass = AddField("Класс окна содержит:", ref y,
                 seed == null ? "" : Clean(seed.Class));
 
             Label l4 = new Label();
             l4.Text = "Где искать:";
-            l4.Location = new Point(14, y + 4);
+            l4.Location = new Point(14, y);
             l4.AutoSize = true;
             Controls.Add(l4);
 
             _cbScope = new ComboBox();
             _cbScope.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cbScope.Location = new Point(170, y);
-            _cbScope.Width = 280;
+            _cbScope.Width = 442;
             _cbScope.Items.Add("Только главные окна (top)");
             _cbScope.Items.Add("Главные и вложенные окна (any)");
             _cbScope.Items.Add("Только вложенные окна (child)");
@@ -1540,14 +1556,15 @@ OktellWatch.exe + config.ini).
             _cbScope.SelectedIndex = sc == "any" ? 1 : (sc == "child" ? 2 : 0);
             _cbScope.SelectedIndexChanged += delegate { UpdatePreview(); };
             Controls.Add(_cbScope);
-            y += 40;
+            _cbScope.Location = new Point(14, y + l4.Height + 3);
+            y += l4.Height + _cbScope.Height + 10;
 
             _lblPreview = new Label();
             _lblPreview.Location = new Point(14, y);
-            _lblPreview.Size = new Size(440, 26);
+            _lblPreview.Size = new Size(442, 32);
             _lblPreview.ForeColor = SystemColors.HotTrack;
             Controls.Add(_lblPreview);
-            y += 34;
+            y += 40;
 
             Button ok = new Button();
             ok.Text = "Сохранить правило";
@@ -1566,6 +1583,9 @@ OktellWatch.exe + config.ini).
             AcceptButton = ok;
             CancelButton = cancel;
 
+            // Высота формы — по фактическому содержимому (зависит от шрифта/DPI)
+            ClientSize = new Size(470, y + 44);
+
             _tbProc.TextChanged += delegate { UpdatePreview(); };
             _tbTitle.TextChanged += delegate { UpdatePreview(); };
             _tbClass.TextChanged += delegate { UpdatePreview(); };
@@ -1576,17 +1596,27 @@ OktellWatch.exe + config.ini).
         {
             Label l = new Label();
             l.Text = caption;
-            l.Location = new Point(14, y + 4);
+            l.Location = new Point(14, y);
             l.AutoSize = true;
             Controls.Add(l);
 
             TextBox tb = new TextBox();
-            tb.Location = new Point(170, y);
-            tb.Width = 280;
             tb.Text = value;
             Controls.Add(tb);
-            y += 40;
+            tb.Location = new Point(14, y + l.Height + 3);
+            tb.Width = 442;
+
+            y += l.Height + tb.Height + 10;
             return tb;
+        }
+
+        // Подсказки-примеры внутри пустых полей (исчезают при вводе)
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            WinApi.SetCue(_tbProc, "например: oktell");
+            WinApi.SetCue(_tbTitle, "например: перезвон");
+            WinApi.SetCue(_tbClass, "необязательно, можно оставить пустым");
         }
 
         // Точка с запятой — разделитель полей правила, в значениях её быть не должно
