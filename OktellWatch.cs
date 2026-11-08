@@ -48,7 +48,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("Oktell Watch")]
 [assembly: System.Reflection.AssemblyProduct("Oktell Watch")]
-[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 namespace OktellWatch
 {
@@ -211,11 +211,17 @@ namespace OktellWatch
     // --------------------------------------------------------------- WatchRule
     // Правило наблюдения: proc:...;title:...;class:...;scope:top|child|any
     // Совпадение = ВСЕ указанные поля найдены в окне (без учёта регистра).
+    // Исключения (с 1.2): proc!:...;title!:...;class!:... — поле НЕ должно
+    // найтись в окне. Работают вместе с обычными признаками: правило
+    // срабатывает, только если ни одно исключение не найдено.
     internal class WatchRule
     {
         public string Proc;
         public string Title;
         public string Class;
+        public string NotProc;    // proc!:  — процесс НЕ должен содержать
+        public string NotTitle;   // title!: — заголовок НЕ должен содержать
+        public string NotClass;   // class!: — класс НЕ должен содержать
         public string Scope = "top";
         public string Raw = "";
         public bool Enabled = true;   // false = правило отключено (off=true)
@@ -244,6 +250,9 @@ namespace OktellWatch
                 if (k == "proc") r.Proc = v;
                 else if (k == "title") r.Title = v;
                 else if (k == "class") r.Class = v;
+                else if (k == "proc!") r.NotProc = v;
+                else if (k == "title!") r.NotTitle = v;
+                else if (k == "class!") r.NotClass = v;
                 else if (k == "scope") r.Scope = v.ToLowerInvariant();
                 else if (k == "off")
                 {
@@ -251,6 +260,8 @@ namespace OktellWatch
                     r.Enabled = !(lv == "1" || lv == "true" || lv == "on" || lv == "yes");
                 }
             }
+            // хотя бы один ОБЫЧНЫЙ признак обязателен (правило только из
+            // исключений не принимаем — оно ловило бы вообще все окна)
             if (Str.IsEmpty(r.Proc) && Str.IsEmpty(r.Title) && Str.IsEmpty(r.Class)) return null;
             if (r.Scope != "top" && r.Scope != "child" && r.Scope != "any") r.Scope = "top";
             return r;
@@ -265,6 +276,10 @@ namespace OktellWatch
             if (!Str.IsEmpty(Proc) && !Str.ContainsIC(w.ProcessName, Proc)) return false;
             if (!Str.IsEmpty(Title) && !Str.ContainsIC(w.Title, Title)) return false;
             if (!Str.IsEmpty(Class) && !Str.ContainsIC(w.ClassName, Class)) return false;
+            // исключения: исключающая подстрока найдена — окно не подходит
+            if (!Str.IsEmpty(NotProc) && Str.ContainsIC(w.ProcessName, NotProc)) return false;
+            if (!Str.IsEmpty(NotTitle) && Str.ContainsIC(w.Title, NotTitle)) return false;
+            if (!Str.IsEmpty(NotClass) && Str.ContainsIC(w.ClassName, NotClass)) return false;
             return !Str.IsEmpty(Proc) || !Str.IsEmpty(Title) || !Str.IsEmpty(Class);
         }
 
@@ -273,6 +288,9 @@ namespace OktellWatch
             return "proc=" + (Proc == null ? "*" : Proc) +
                    " title=" + (Title == null ? "*" : Title) +
                    " class=" + (Class == null ? "*" : Class) +
+                   (Str.IsEmpty(NotProc) ? "" : " proc!~" + NotProc) +
+                   (Str.IsEmpty(NotTitle) ? "" : " title!~" + NotTitle) +
+                   (Str.IsEmpty(NotClass) ? "" : " class!~" + NotClass) +
                    " scope=" + (Scope == null ? "top" : Scope);
         }
 
@@ -284,6 +302,9 @@ namespace OktellWatch
             if (!Str.IsEmpty(Proc)) sb.Append("proc:").Append(Proc.Trim()).Append(';');
             if (!Str.IsEmpty(Title)) sb.Append("title:").Append(Title.Trim()).Append(';');
             if (!Str.IsEmpty(Class)) sb.Append("class:").Append(Class.Trim()).Append(';');
+            if (!Str.IsEmpty(NotProc)) sb.Append("proc!:").Append(NotProc.Trim()).Append(';');
+            if (!Str.IsEmpty(NotTitle)) sb.Append("title!:").Append(NotTitle.Trim()).Append(';');
+            if (!Str.IsEmpty(NotClass)) sb.Append("class!:").Append(NotClass.Trim()).Append(';');
             sb.Append("scope:").Append(Str.IsEmpty(Scope) ? "top" : Scope.Trim().ToLowerInvariant());
             return sb.ToString();
         }
@@ -307,6 +328,9 @@ namespace OktellWatch
             if (!Str.IsEmpty(Proc)) p.Add("процесс ~«" + Proc.Trim() + "»");
             if (!Str.IsEmpty(Title)) p.Add("заголовок ~«" + Title.Trim() + "»");
             if (!Str.IsEmpty(Class)) p.Add("класс ~«" + Class.Trim() + "»");
+            if (!Str.IsEmpty(NotProc)) p.Add("процесс НЕ ~«" + NotProc.Trim() + "»");
+            if (!Str.IsEmpty(NotTitle)) p.Add("заголовок НЕ ~«" + NotTitle.Trim() + "»");
+            if (!Str.IsEmpty(NotClass)) p.Add("класс НЕ ~«" + NotClass.Trim() + "»");
             string sc = Str.Lo(Scope);
             if (sc == "child") p.Add("только вложенные окна");
             else if (sc == "any") p.Add("главные и вложенные окна");
@@ -1400,7 +1424,7 @@ folder=logs
         }
 
         public const string HelpText =
-@"OKTELL WATCH 1.1.1 — сторож формы обратного звонка
+@"OKTELL WATCH 1.2 — сторож формы обратного звонка
 ============================================================
 
 ЗАЧЕМ
@@ -1444,7 +1468,15 @@ folder=logs
    scope:  top   — окна верхнего уровня (по умолчанию)
            child — внутренние окна (элементы внутри главного окна)
            any   — искать и там, и там
+   proc!:  процесс НЕ должен содержать (исключение, с 1.2)
+   title!: заголовок НЕ должен содержать (исключение, с 1.2)
+   class!: класс НЕ должен содержать (исключение, с 1.2)
 • Регистр не важен; совпадение = ВСЕ указанные поля найдены в окне.
+• Исключения (со знаком «!») сужают правило: окно подходит, только
+  если исключающая подстрока НЕ найдена. Например, ловим «обратн»,
+  но не окна дозвона после подтверждения:
+   rule1=proc:oktell;title:обратн;title!:дозвон;scope:top
+  Хотя бы один обычный признак (без «!») обязателен.
 • Несколько правил (rule1, rule2, ...) работают как «ИЛИ».
 • Выключенное правило хранится с пометкой off:true — ставит и снимает
   его Диспетчер правил (галочкой).
@@ -1511,6 +1543,9 @@ OktellWatch.exe + config.ini).
         private readonly TextBox _tbProc;
         private readonly TextBox _tbTitle;
         private readonly TextBox _tbClass;
+        private readonly CheckBox _ckNotProc;
+        private readonly CheckBox _ckNotTitle;
+        private readonly CheckBox _ckNotClass;
         private readonly ComboBox _cbScope;
         private readonly Label _lblPreview;
         private readonly bool _wasEnabled;
@@ -1533,12 +1568,15 @@ OktellWatch.exe + config.ini).
             // каком DPI (исправлено в 1.1.1). Примеры показываются внутри
             // пустых полей — см. OnShown.
             int y = 14;
-            _tbProc = AddField("Процесс содержит:", ref y,
-                seed == null ? "" : Clean(seed.Proc));
-            _tbTitle = AddField("Заголовок окна содержит:", ref y,
-                seed == null ? "" : Clean(seed.Title));
-            _tbClass = AddField("Класс окна содержит:", ref y,
-                seed == null ? "" : Clean(seed.Class));
+            _tbProc = AddField("Процесс содержит:",
+                seed == null ? "" : Clean(seed.Proc),
+                seed != null && !Str.IsEmpty(seed.NotProc), ref y, out _ckNotProc);
+            _tbTitle = AddField("Заголовок окна содержит:",
+                seed == null ? "" : Clean(seed.Title),
+                seed != null && !Str.IsEmpty(seed.NotTitle), ref y, out _ckNotTitle);
+            _tbClass = AddField("Класс окна содержит:",
+                seed == null ? "" : Clean(seed.Class),
+                seed != null && !Str.IsEmpty(seed.NotClass), ref y, out _ckNotClass);
 
             Label l4 = new Label();
             l4.Text = "Где искать:";
@@ -1592,13 +1630,25 @@ OktellWatch.exe + config.ini).
             UpdatePreview();
         }
 
-        private TextBox AddField(string caption, ref int y, string value)
+        // Поле ввода: подпись над полем + галочка «не содержит» (исключение)
+        private TextBox AddField(string caption, string value, bool notValue,
+                                 ref int y, out CheckBox neg)
         {
             Label l = new Label();
             l.Text = caption;
             l.Location = new Point(14, y);
             l.AutoSize = true;
             Controls.Add(l);
+
+            // галочка-инверсия: превращает поле в исключение (title!: и т.п.)
+            neg = new CheckBox();
+            neg.Text = "не содержит";
+            neg.AutoSize = true;
+            neg.Checked = notValue;
+            int lw = TextRenderer.MeasureText(caption, Font).Width;
+            neg.Location = new Point(14 + lw + 18, y - 4);
+            neg.CheckedChanged += delegate { UpdatePreview(); };
+            Controls.Add(neg);
 
             TextBox tb = new TextBox();
             tb.Text = value;
@@ -1642,11 +1692,21 @@ OktellWatch.exe + config.ini).
             string title = Clean(_tbTitle.Text);
             string cls = Clean(_tbClass.Text);
             if (proc.Length == 0 && title.Length == 0 && cls.Length == 0) return null;
+            // хотя бы одно поле должно быть ОБЫЧНЫМ признаком, а не исключением:
+            // правило только из «не содержит» ловило бы вообще все окна
+            bool anyPositive =
+                (proc.Length > 0 && !_ckNotProc.Checked) ||
+                (title.Length > 0 && !_ckNotTitle.Checked) ||
+                (cls.Length > 0 && !_ckNotClass.Checked);
+            if (!anyPositive) return null;
             StringBuilder sb = new StringBuilder();
             if (!_wasEnabled) sb.Append("off:true;");
-            if (proc.Length > 0) sb.Append("proc:").Append(proc).Append(';');
-            if (title.Length > 0) sb.Append("title:").Append(title).Append(';');
-            if (cls.Length > 0) sb.Append("class:").Append(cls).Append(';');
+            if (proc.Length > 0)
+                sb.Append(_ckNotProc.Checked ? "proc!:" : "proc:").Append(proc).Append(';');
+            if (title.Length > 0)
+                sb.Append(_ckNotTitle.Checked ? "title!:" : "title:").Append(title).Append(';');
+            if (cls.Length > 0)
+                sb.Append(_ckNotClass.Checked ? "class!:" : "class:").Append(cls).Append(';');
             sb.Append("scope:").Append(ScopeValue());
             return WatchRule.Parse(sb.ToString());
         }
@@ -1664,7 +1724,8 @@ OktellWatch.exe + config.ini).
             WatchRule r = Build();
             if (r == null)
             {
-                MessageBox.Show("Укажите хотя бы один признак: процесс, заголовок или класс окна.",
+                MessageBox.Show("Укажите хотя бы один признак: процесс, заголовок или класс окна.\n" +
+                        "Исключения («не содержит») только сужают правило — сами по себе признаком не являются.",
                     "Oktell Watch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
