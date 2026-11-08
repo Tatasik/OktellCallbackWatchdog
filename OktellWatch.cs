@@ -2789,10 +2789,19 @@ OktellWatch.exe + config.ini).
 
         // --------------------------------------------------- значок
         // Логотип: тёмно-синий скруглённый квадрат, оранжевая галочка,
-        // белый динамик с дугами звука. Тот же рисунок вшит в EXE как
-        // значок файла (build.bat: /win32icon:OktellWatch.ico).
+        // белый динамик с дугами звука (динамик — выше и левее, отдельно
+        // от галки). Сначала берём настоящий значок, вшитый в EXE при
+        // сборке (build.bat: /win32icon:OktellWatch.ico), — тогда трей и
+        // заголовки окон всегда совпадают со значком файла. Если значок
+        // не вшит (сборка без /win32icon) — рисуем запасной вариант сами.
         private static Icon BuildIcon()
         {
+            try
+            {
+                Icon emb = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (emb != null) return emb;
+            }
+            catch { }
             try
             {
                 using (Bitmap bmp = new Bitmap(32, 32))
@@ -2824,19 +2833,20 @@ OktellWatch.exe + config.ini).
                                 new PointF(26.5f, 7.5f) });
                         }
 
-                        // динамик — белый, справа две дуги звука
+                        // динамик — белый, выше и левее галки (не касается
+                        // её), справа две дуги звука; пропорции как у значка
                         using (SolidBrush w = new SolidBrush(Color.White))
                         {
-                            g.FillRectangle(w, 10.5f, 14.5f, 2.8f, 5.0f);
+                            g.FillRectangle(w, 5.4f, 6.1f, 2.9f, 4.3f);
                             g.FillPolygon(w, new[] {
-                                new PointF(13.3f, 13.2f), new PointF(13.3f, 20.8f),
-                                new PointF(17.2f, 23.4f), new PointF(17.2f, 10.6f) });
-                            using (Pen p = new Pen(Color.White, 1.7f))
+                                new PointF(8.1f, 4.6f), new PointF(8.1f, 11.9f),
+                                new PointF(12.1f, 14.6f), new PointF(12.1f, 1.9f) });
+                            using (Pen p = new Pen(Color.White, 1.6f))
                             {
                                 p.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                                 p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                                g.DrawArc(p, 18.0f, 12.4f, 7.2f, 8.2f, -52f, 104f);
-                                g.DrawArc(p, 20.6f, 9.8f, 10.4f, 13.4f, -52f, 104f);
+                                g.DrawArc(p, 8.1f, 3.75f, 9.0f, 9.0f, -52f, 104f);
+                                g.DrawArc(p, 6.6f, 2.25f, 12.0f, 12.0f, -52f, 104f);
                             }
                         }
                     }
