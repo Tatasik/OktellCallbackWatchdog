@@ -18,7 +18,9 @@
 //        /r:System.Windows.Forms.dll /out:OktellWatch.exe OktellWatch.cs
 //
 //  Использование:
-//    1. Положите рядом config.ini (создаётся автоматически при первом пуске).
+//    1. Конфиг config.ini лежит в подпапке system рядом с программой
+//       (создаётся при первом пуске; при обновлении со старых версий
+//       переносится туда автоматически).
 //    2. Запустите OktellWatch.exe — значок появится возле часов.
 //    3. Правый клик по значку: Диспетчер правил, Инспектор окон, Пауза,
 //       Справка, Выход.
@@ -601,7 +603,7 @@ namespace OktellWatch
         public bool FlashTaskbar = true;
 
         public bool LogEnabled = true;
-        public string LogFolder = "logs";
+        public string LogFolder = "system\\logs";
 
         public string LogFolderAbsolute
         {
@@ -612,7 +614,7 @@ namespace OktellWatch
                     if (Path.IsPathRooted(LogFolder)) return LogFolder;
                     return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LogFolder);
                 }
-                catch { return "logs"; }
+                catch { return "system\\logs"; }
             }
         }
 
@@ -651,7 +653,7 @@ namespace OktellWatch
             BringToFront = Ini.GetBool("alert", "bringToFront", true);
             FlashTaskbar = Ini.GetBool("alert", "flashTaskbar", true);
             LogEnabled = Ini.GetBool("log", "enabled", true);
-            LogFolder = Ini.Get("log", "folder", "logs");
+            LogFolder = Ini.Get("log", "folder", "system\\logs");
 
             Rules.Clear();
             BadRules.Clear();
@@ -760,9 +762,9 @@ bringToFront=true
 flashTaskbar=true
 
 [log]
-; Вести журнал (папка рядом с программой)
+; Вести журнал (подпапка system рядом с программой)
 enabled=true
-folder=logs
+folder=system\logs
 
 ";
     }
@@ -1635,7 +1637,8 @@ folder=logs
 Мигание      — кнопка окна мигает на панели задач до его активации.
 
 ЖУРНАЛ
-Папка logs рядом с программой: OktellWatch_ГГГГММДД.log.
+Журнал: system\logs рядом с программой, файл OktellWatch_ГГГГММДД.log
+(папку можно поменять: [log] folder= в config.ini).
 События: START, DETECTED (форма найдена), ALERT / RE-ALERT (сигналы),
 CLOSED (форма обработана/закрыта), SKIP (окно без кнопок проигнорировано),
 SOUND (звук остановлен), CONFIG (изменения настроек), PAUSE / RESUME,
@@ -1656,8 +1659,9 @@ config.ini можно править в Блокноте прямо во вре�
 СОВЕТ ПО ВНЕДРЕНИЮ
 Сначала обкатайте на одном компьютере: найдите инспектором реальное
 окно формы, уточните правило, послушайте громкость сигнала, затем
-включите автозапуск и разверните на остальных АРМ (файлы программы:
-OktellWatch.exe + config.ini).
+включите автозапуск и разверните на остальных АРМ (достаточно одного
+файла OktellWatch.exe — конфиг и журнал в подпапке system создадутся
+сами).
 ";
     }
 
@@ -2222,13 +2226,48 @@ OktellWatch.exe + config.ini).
         private int _hookCooldownMs = 250;
         private int[] _matchCounts = new int[0];
 
+        // -------------------------------------- portable-компоновка (system\)
+        // Служебные файлы живут в подпапке system рядом с EXE: config.ini и
+        // журнал (по умолчанию system\logs), в пакете из Releases — ещё
+        // build.bat и значок. Рядом с EXE остаётся только сам EXE — не нужно
+        // гадать, какой файл запускать. Если конфига в system ещё нет, а в
+        // корне лежит config.ini от версии 1.2 и раньше — он копируется в
+        // system (старый файл остаётся на месте: откат полностью безопасен).
+        private bool _configMigrated;
+
+        private string ResolveConfigPath()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string sysDir = Path.Combine(baseDir, "system");
+            string newPath = Path.Combine(sysDir, "config.ini");
+            string oldPath = Path.Combine(baseDir, "config.ini");
+            try
+            {
+                Directory.CreateDirectory(sysDir);
+                if (!File.Exists(newPath) && File.Exists(oldPath))
+                {
+                    File.Copy(oldPath, newPath, false);
+                    _configMigrated = true;
+                }
+            }
+            catch
+            {
+                // не смогли создать system\ или скопировать — работаем со старым
+                return File.Exists(oldPath) ? oldPath : newPath;
+            }
+            return newPath;
+        }
+
         public WatchContext()
         {
-            string cfg = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini");
+            string cfg = ResolveConfigPath();
             _settings = new Settings(cfg);
             _settings.EnsureExists();
             _settings.Load();
             ApplyLogSettings();
+            if (_configMigrated)
+                Log.Write("CONFIG", "старый config.ini перенесён: копия в system\\config.ini, " +
+                                    "старый файл оставлен на месте (можно удалить)");
             for (int i = 0; i < _settings.BadRules.Count; i++)
                 Log.Write("CONFIG", "не удалось разобрать правило: " + _settings.BadRules[i]);
 
