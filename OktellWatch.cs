@@ -114,10 +114,12 @@ namespace OktellWatch
             catch { }
         }
 
-        // Хук событий окон: мгновенное узнавание о показе нового окна (v1.1)
+        // Хук событий окон: мгновенное узнавание о показе нового окна
+        // и о закрытии наблюдаемого (v1.1 показ, v1.2 + закрытие)
         public delegate void WinEventDelegate(IntPtr hHook, uint evt, IntPtr hwnd,
             int idObject, int idChild, uint thread, uint time);
 
+        public const uint EVENT_OBJECT_DESTROY = 0x8001;   // окно уничтожено
         public const uint EVENT_OBJECT_SHOW = 0x8002;      // окно показано
         public const uint WINEVENT_OUTOFCONTEXT = 0x0000;  // колбэк в message loop нашего потока
 
@@ -128,6 +130,15 @@ namespace OktellWatch
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+        // Экстренное глушение звука: PlaySound(NULL, NULL, SND_PURGE) останавливает
+        // всё, что проигрывается на текущем потоке через winmm — в том числе
+        // системные сигналы SystemSounds, которые иначе не остановить.
+        public const int SND_ASYNC = 0x0001;
+        public const int SND_PURGE = 0x0040;
+
+        [DllImport("winmm.dll", CharSet = CharSet.Auto)]
+        public static extern bool PlaySound(string pszSound, IntPtr hmod, int fdwSound);
 
         // Перечисление дочерних окон — уже объявлено выше (EnumChildWindows
         // с делегатом EnumProc), здесь только поиск видимых кнопок в форме.
@@ -1580,6 +1591,10 @@ folder=logs
 СИГНАЛЫ
 Звук         — задан в [alert] soundFile (если файла нет — системный).
 Повтор       — каждые repeatEverySec секунд, пока форма не обработана.
+Обрыв        — закрыли последнюю наблюдаемую форму — звук гаснет
+               мгновенно и не доигрывает до конца файла (чтобы сигнал
+               не попал в эфир, когда оператор уже говорит с клиентом).
+               Пауза наблюдения глушит звук тоже.
 Окно наверх  — при первом обнаружении (галочка «Поднимать окно наверх»
                в меню трея, либо bringToFront=false в config.ini).
 Мигание      — кнопка окна мигает на панели задач до его активации.
@@ -1587,8 +1602,9 @@ folder=logs
 ЖУРНАЛ
 Папка logs рядом с программой: OktellWatch_ГГГГММДД.log.
 События: START, DETECTED (форма найдена), ALERT / RE-ALERT (сигналы),
-CLOSED (форма обработана/закрыта), CONFIG (изменения настроек),
-PAUSE / RESUME, ERROR.
+CLOSED (форма обработана/закрыта), SKIP (окно без кнопок проигнорировано),
+SOUND (звук остановлен), CONFIG (изменения настроек), PAUSE / RESUME,
+ERROR.
 
 АВТОЗАПУСК
 Меню значка в трее -> «Автозапуск с Windows» (прописывается в реестр
@@ -1599,8 +1615,8 @@ config.ini можно править в Блокноте прямо во вре�
 перечитает его в течение секунды. Сохраняйте файл в кодировке UTF-8.
 
 ПАУЗА
-Меню значка -> «Пауза наблюдения» — сигналы отключаются, журнал
-продолжает вестись.
+Меню значка -> «Пауза наблюдения» — сигналы отключаются, играющий
+звук обрывается, журнал продолжает вестись.
 
 СОВЕТ ПО ВНЕДРЕНИЮ
 Сначала обкатайте на одном компьютере: найдите инспектором реальное
@@ -2197,7 +2213,7 @@ OktellWatch.exe + config.ini).
             UpdateStatus();
 
             string mode = (_hook != IntPtr.Zero)
-                ? "события показа окон (мгновенно) + страховочный опрос"
+                ? "события показа/закрытия окон (мгновенно) + страховочный опрос"
                 : "только опрос";
             Log.Write("START", "запущен; правил: " + _settings.Rules.Count +
                                "; обнаружение: " + mode +
@@ -2217,12 +2233,14 @@ OktellWatch.exe + config.ini).
             try
             {
                 _hookProc = OnWinEvent;
-                _hook = WinApi.SetWinEventHook(WinApi.EVENT_OBJECT_SHOW, WinApi.EVENT_OBJECT_SHOW,
+                // Диапазон 0x8001..0x8002: и EVENT_OBJECT_SHOW (новое окно),
+                // и EVENT_OBJECT_DESTROY (наблюдаемое окно закрыли).
+                _hook = WinApi.SetWinEventHook(WinApi.EVENT_OBJECT_DESTROY, WinApi.EVENT_OBJECT_SHOW,
                     IntPtr.Zero, _hookProc, 0, 0, WinApi.WINEVENT_OUTOFCONTEXT);
             }
             catch { _hook = IntPtr.Zero; }
             Log.Write("CONFIG", _hook != IntPtr.Zero
-                ? "хук событий окон установлен: новые окна ловятся мгновенно"
+                ? "хук событий окон установлен: показ и закрытие окон отслеживаются мгновенно"
                 : "хук событий недоступен — работает только опрос");
         }
 
@@ -2235,8 +2253,19 @@ OktellWatch.exe + config.ini).
 
         private void OnWinEvent(IntPtr hHook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
-            if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return; // интересует показ окон (OBJID_WINDOW)
+            if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return; // интересуют окна (OBJID_WINDOW)
             if (_paused || _captureHold) return;
+
+            // Наблюдаемое окно уничтожено — закрываем трек и глушим звук
+            // немедленно, без троттлинга и не дожидаясь ближайшего опроса:
+            // звук не должен доигрывать, пока оператор уже говорит с клиентом.
+            if (evt == WinApi.EVENT_OBJECT_DESTROY && _tracked.ContainsKey(hwnd.ToInt64()))
+            {
+                try { CloseTrack(hwnd.ToInt64(), "окно закрыто"); }
+                catch (Exception ex) { Log.Write("ERROR", "CloseTrack(hook): " + ex.Message); }
+                return;
+            }
+
             int now = Environment.TickCount;
             if (unchecked(now - _lastScanTick) < _hookCooldownMs) return;    // троттлинг
             try { Scan(); }
@@ -2339,6 +2368,7 @@ OktellWatch.exe + config.ini).
         {
             _paused = !_paused;
             _miPause.Text = _paused ? "Продолжить наблюдение" : "Пауза наблюдения";
+            if (_paused) StopSound("пауза наблюдения");
             Log.Write(_paused ? "PAUSE" : "RESUME",
                 _paused ? "наблюдение приостановлено оператором" : "наблюдение возобновлено");
             UpdateStatus();
@@ -2446,15 +2476,38 @@ OktellWatch.exe + config.ini).
             foreach (KeyValuePair<long, Track> kv in _tracked)
                 if (!found.ContainsKey(kv.Key)) gone.Add(kv.Key);
             for (int i = 0; i < gone.Count; i++)
-            {
-                Track t = _tracked[gone[i]];
-                _tracked.Remove(gone[i]);
-                Log.Write("CLOSED", "окно исчезло (обработано); сигналов: " + t.Alerts +
-                                    "; держалось: " + (int)(DateTime.Now - t.FirstSeen).TotalSeconds + " сек; " +
-                                    t.Info.Describe());
-            }
+                CloseTrack(gone[i], "окно исчезло (обработано)");
 
             UpdateStatus();
+        }
+
+        // Закрытие трека. Если наблюдаемых окон не осталось — звук гаснет
+        // немедленно: оператор мог уже подтвердить задачу и говорить
+        // с клиентом, доигрывающий сигнал в эфир попадать не должен.
+        private void CloseTrack(long hwnd, string reason)
+        {
+            Track t;
+            if (!_tracked.TryGetValue(hwnd, out t)) return;
+            _tracked.Remove(hwnd);
+            Log.Write("CLOSED", reason + "; сигналов: " + t.Alerts +
+                                "; держалось: " + (int)(DateTime.Now - t.FirstSeen).TotalSeconds + " сек; " +
+                                t.Info.Describe());
+            if (_tracked.Count == 0) StopSound("наблюдаемых окон не осталось");
+            UpdateStatus();
+        }
+
+        // Немедленная остановка звука: останавливаем наш плеер и (на случай
+        // системного сигнала) всё, что играет на этом потоке через winmm.
+        private void StopSound(string reason)
+        {
+            try
+            {
+                if (_player != null) { try { _player.Stop(); } catch { } }
+                try { WinApi.PlaySound(null, IntPtr.Zero, WinApi.SND_ASYNC | WinApi.SND_PURGE); }
+                catch { }
+                Log.Write("SOUND", "звук остановлен (" + reason + ")");
+            }
+            catch { }
         }
 
         private void Alert(Track t)
