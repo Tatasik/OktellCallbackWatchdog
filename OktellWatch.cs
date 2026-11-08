@@ -48,7 +48,14 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("Oktell Watch")]
 [assembly: System.Reflection.AssemblyProduct("Oktell Watch")]
+[assembly: System.Reflection.AssemblyDescription("Сторож формы обратного звонка Oktell: мгновенно ловит беззвучную форму задачи, подаёт звуковой сигнал и выводит окно наверх. Открытый исходный код: github.com/Tatasik/OktellCallbackWatchdog")]
+[assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
+[assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
+[assembly: System.Reflection.AssemblyTrademark("")]
 [assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2")]
+[assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
 {
