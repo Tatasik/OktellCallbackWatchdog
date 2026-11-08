@@ -52,9 +52,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2")]
+[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.1")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -695,20 +695,40 @@ visibleOnly=true
 ;   scope:  top   — окна верхнего уровня (по умолчанию)
 ;           child — внутренние окна (элементы внутри главного окна)
 ;           any   — искать и там, и там
+;   proc!:  процесс НЕ должен содержать (исключение)
+;   title!: заголовок НЕ должен содержать (исключение)
+;   class!: класс НЕ должен содержать (исключение)
+;   btn:    true — в окне должна быть видимая кнопка; окна без кнопок
+;           (например, дозвон после подтверждения) игнорируются
 ; Регистр не важен. Совпадение = ВСЕ указанные поля найдены в окне.
+; Исключения (поля со знаком «!») сужают правило: окно подходит, только
+; если исключающая подстрока НЕ найдена в окне. Хотя бы один обычный
+; признак (без «!») в правиле обязателен.
 ; Несколько правил работают как «ИЛИ». Лишнее поле просто не указывайте.
 ; Выключенное правило помечается off:true (это делает Диспетчер правил).
 ; Добавлять и убирать правила удобнее через «Диспетчер правил...» в меню
 ; значка у часов — править файл вручную не обязательно.
 
-; Основное правило: процесс Oktell, в заголовке окна есть «обратн»
-rule1=proc:oktell;title:обратн;scope:top
+; Основное правило: процесс Oktell, в заголовке окна есть «зарезерв»
+; (строка «Вы зарезервированы на выполнение задачи» — она есть во всех
+; задачах обратного звонка), в окне есть кнопки — окно дозвона
+; (без кнопок) игнорируется само.
+rule1=proc:oktell;title:зарезерв;btn:true;scope:top
 
 ; Примеры (включите галочкой в Диспетчере правил или раскомментируйте):
 ;rule2=proc:oktell;title:перезвон;scope:top
 ;rule3=proc:oktell;title:заказ звонка;scope:top
 ;rule4=proc:oktell;title:забронир;scope:top
 ;rule5=proc:oktell;title:обратн;scope:child
+
+; То же слово, но без проверки кнопок — на случай, если какая-то нужная
+; форма окажется с нарисованными вручную (нестандартными) кнопками:
+;rule6=proc:oktell;title:зарезерв;scope:top
+
+; Исключение дозвона: ловим «обратн», но НЕ окна дозвона, которые
+; появляются после подтверждения звонка (точное слово подскажет
+; заголовок окна — см. «Окно под курсором» в справке):
+;rule7=proc:oktell;title:обратн;title!:дозвон;scope:top
 
 ; --- Тонкая настройка (обычно менять не нужно) ---
 ; Реагировать на события показа окон не чаще, чем раз в N мс
@@ -728,6 +748,11 @@ repeatAlert=true
 ; Период повтора сигнала, сек
 repeatEverySec=5
 
+; Звук обрывается мгновенно, как только закрыта последняя наблюдаемая
+; форма (не доигрывает до конца файла — чтобы сигнал не попал в эфир,
+; когда оператор уже говорит с клиентом). Пауза наблюдения глушит
+; звук тоже; отдельно это поведение не настраивается.
+
 ; Выводить окно Oktell наверх при первом обнаружении формы
 bringToFront=true
 
@@ -738,6 +763,7 @@ flashTaskbar=true
 ; Вести журнал (папка рядом с программой)
 enabled=true
 folder=logs
+
 ";
     }
 
@@ -1095,6 +1121,7 @@ folder=logs
         {
             _owner = owner;
             _w = w;
+            Icon = owner.AppIcon;
 
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -1137,7 +1164,7 @@ folder=logs
             add.Click += delegate
             {
                 WatchRule seed = WatchRule.Parse(rule.Text) ?? WatchRule.FromWindow(_w);
-                WatchRule res = RuleEditForm.Edit(this, seed, "Новое правило наблюдения");
+                WatchRule res = RuleEditForm.Edit(this, seed, "Новое правило наблюдения", _owner.AppIcon);
                 if (res == null) return;
                 _owner.AddRule(res.ToRaw());
                 Close();
@@ -1218,6 +1245,7 @@ folder=logs
         public InspectorForm(WatchContext owner)
         {
             _owner = owner;
+            Icon = owner.AppIcon;
 
             Text = "Oktell Watch — инспектор окон";
             Size = new Size(920, 580);
@@ -1533,7 +1561,7 @@ folder=logs
         }
 
         public const string HelpText =
-@"OKTELL WATCH 1.2 — сторож формы обратного звонка
+@"OKTELL WATCH 1.2.1 — сторож формы обратного звонка
 ============================================================
 
 ЗАЧЕМ
@@ -1865,10 +1893,11 @@ OktellWatch.exe + config.ini).
         }
 
         // Открыть редактор; вернуть готовое правило (null = отмена)
-        public static WatchRule Edit(IWin32Window owner, WatchRule seed, string caption)
+        public static WatchRule Edit(IWin32Window owner, WatchRule seed, string caption, Icon icon)
         {
             using (RuleEditForm f = new RuleEditForm(seed, caption))
             {
+                f.Icon = icon;
                 if (f.ShowDialog(owner) != DialogResult.OK) return null;
                 return WatchRule.Parse(f.SavedRaw);
             }
@@ -1893,6 +1922,7 @@ OktellWatch.exe + config.ini).
         public RulesManagerForm(WatchContext owner)
         {
             _owner = owner;
+            Icon = owner.AppIcon;
 
             Text = "Oktell Watch — диспетчер правил";
             Size = new Size(780, 540);
@@ -2053,7 +2083,7 @@ OktellWatch.exe + config.ini).
 
         private void AddNew()
         {
-            WatchRule res = RuleEditForm.Edit(this, null, "Новое правило наблюдения");
+            WatchRule res = RuleEditForm.Edit(this, null, "Новое правило наблюдения", _owner.AppIcon);
             if (res == null) return;
             _rules.Add(res);
             if (_owner.SaveRules(_rules))
@@ -2073,7 +2103,7 @@ OktellWatch.exe + config.ini).
             int idx = _lvRules.SelectedIndices[0];
             if (idx < 0 || idx >= _rules.Count) return;
             WatchRule res = RuleEditForm.Edit(this, _rules[idx],
-                "Правило №" + (idx + 1) + " — изменение");
+                "Правило №" + (idx + 1) + " — изменение", _owner.AppIcon);
             if (res == null) return;
             _rules[idx] = res;
             if (_owner.SaveRules(_rules)) Populate();
@@ -2210,7 +2240,7 @@ OktellWatch.exe + config.ini).
             ApplyScanPolicy();
 
             _tray = new NotifyIcon();
-            _tray.Icon = BuildIcon();
+            _tray.Icon = AppIcon;
             _tray.Text = "Oktell Watch";
             _tray.ContextMenuStrip = BuildMenu();
             _tray.Visible = true;
@@ -2749,7 +2779,18 @@ OktellWatch.exe + config.ini).
             return max + 1;
         }
 
+        Icon _appIcon;
+
+        // Единый значок приложения (трей и заголовки окон) — рисуется один раз
+        internal Icon AppIcon
+        {
+            get { if (_appIcon == null) _appIcon = BuildIcon(); return _appIcon; }
+        }
+
         // --------------------------------------------------- значок
+        // Логотип: тёмно-синий скруглённый квадрат, оранжевая галочка,
+        // белый динамик с дугами звука. Тот же рисунок вшит в EXE как
+        // значок файла (build.bat: /win32icon:OktellWatch.ico).
         private static Icon BuildIcon()
         {
             try
@@ -2759,14 +2800,44 @@ OktellWatch.exe + config.ini).
                     using (Graphics g = Graphics.FromImage(bmp))
                     {
                         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(0, 120, 215)))
-                            g.FillEllipse(b, 1, 1, 30, 30);
-                        using (Font f = new Font("Segoe UI", 15f, FontStyle.Bold))
-                        using (StringFormat sf = new StringFormat())
+
+                        // фон — тёмно-синий скруглённый квадрат
+                        using (System.Drawing.Drawing2D.GraphicsPath bg = new System.Drawing.Drawing2D.GraphicsPath())
                         {
-                            sf.Alignment = StringAlignment.Center;
-                            sf.LineAlignment = StringAlignment.Center;
-                            g.DrawString("!", f, Brushes.White, new RectangleF(0, 1, 32, 32), sf);
+                            bg.AddArc(0, 0, 12, 12, 180, 90);
+                            bg.AddArc(20, 0, 12, 12, 270, 90);
+                            bg.AddArc(20, 20, 12, 12, 0, 90);
+                            bg.AddArc(0, 20, 12, 12, 90, 90);
+                            bg.CloseFigure();
+                            using (SolidBrush b = new SolidBrush(Color.FromArgb(38, 62, 98)))
+                                g.FillPath(b, bg);
+                        }
+
+                        // галочка — оранжевая, скруглённые концы
+                        using (Pen p = new Pen(Color.FromArgb(245, 130, 32), 6.2f))
+                        {
+                            p.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                            p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                            p.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                            g.DrawLines(p, new[] {
+                                new PointF(5.5f, 16.5f), new PointF(12.5f, 23.5f),
+                                new PointF(26.5f, 7.5f) });
+                        }
+
+                        // динамик — белый, справа две дуги звука
+                        using (SolidBrush w = new SolidBrush(Color.White))
+                        {
+                            g.FillRectangle(w, 10.5f, 14.5f, 2.8f, 5.0f);
+                            g.FillPolygon(w, new[] {
+                                new PointF(13.3f, 13.2f), new PointF(13.3f, 20.8f),
+                                new PointF(17.2f, 23.4f), new PointF(17.2f, 10.6f) });
+                            using (Pen p = new Pen(Color.White, 1.7f))
+                            {
+                                p.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                                p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                                g.DrawArc(p, 18.0f, 12.4f, 7.2f, 8.2f, -52f, 104f);
+                                g.DrawArc(p, 20.6f, 9.8f, 10.4f, 13.4f, -52f, 104f);
+                            }
                         }
                     }
                     IntPtr hIcon = bmp.GetHicon();

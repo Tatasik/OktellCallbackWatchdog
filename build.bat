@@ -17,7 +17,11 @@ if not exist "%CSC%" (
 )
 
 echo Building OktellWatch.exe ...
-"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ ^
+rem Иконка EXE-файла (если OktellWatch.ico рядом — вшиваем)
+set ICON=
+if exist OktellWatch.ico set ICON=/win32icon:OktellWatch.ico
+
+"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ %ICON% ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
   /out:OktellWatch.exe OktellWatch.cs
 

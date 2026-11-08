@@ -9,6 +9,7 @@
 
 # Двоичные файлы — не трогать
 *.exe binary
+*.ico  binary
 *.zip binary
 *.wav binary
 *.png binary
