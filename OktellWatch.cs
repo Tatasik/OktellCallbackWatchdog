@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.2.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.2")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -175,6 +175,42 @@ namespace OktellWatch
                 return true;
             }, IntPtr.Zero);
             return found;
+        }
+
+        // Диагностика btn:true (1.2.3): состав внутренних окон для журнала —
+        // «класс|текст», до max штук; скрытые помечены [скрыт]. По этой картине
+        // видно, являются ли кнопки скиновой формы оконными контролами или
+        // нарисованы на скине (тогда btn:true на форме не сработает).
+        public static string DescribeChildren(IntPtr h, int max)
+        {
+            if (h == IntPtr.Zero || !IsWindow(h)) return "";
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            EnumChildWindows(h, delegate(IntPtr ch, IntPtr lp)
+            {
+                if (n >= max) return false;
+                try
+                {
+                    StringBuilder cls = new StringBuilder(256);
+                    GetClassName(ch, cls, 256);
+                    int len = GetWindowTextLength(ch);
+                    string t = "";
+                    if (len > 0)
+                    {
+                        StringBuilder tb = new StringBuilder(len + 2);
+                        GetWindowText(ch, tb, tb.Capacity);
+                        t = tb.ToString();
+                        if (t.Length > 40) t = t.Substring(0, 40);
+                    }
+                    if (sb.Length > 0) sb.Append("; ");
+                    if (!IsWindowVisible(ch)) sb.Append("[скрыт]");
+                    sb.Append(cls.ToString()).Append("|").Append(t);
+                    n++;
+                }
+                catch { }
+                return true;
+            }, IntPtr.Zero);
+            return sb.ToString();
         }
 
         public static void EnableDpiAware()
@@ -1005,22 +1041,30 @@ folder=system\logs
         }
 
         // Не спамим в журнал: окно без кнопок живёт долго, а Collect вызывается
-        // и хуком (раз в 250 мс), и опросом — пишем не чаще раза в 15 секунд на окно
+        // и хуком (раз в 250 мс), и опросом — пишем не чаще раза в 15 секунд,
+        // ключ — корневое окно формы (с 1.2.3). В запись включён состав формы:
+        // класс корня и список внутренних окон «класс|текст» — по ней видно,
+        // есть ли на форме оконные контролы-кнопки или они нарисованы на скине.
         private static readonly Dictionary<long, int> _btnSkipLogged = new Dictionary<long, int>();
 
         private static void LogSkipButtons(int ruleNo, WindowInfo wi)
         {
             try
             {
-                long k = wi.Hwnd.ToInt64();
+                IntPtr root = (wi.IsChild && wi.RootHwnd != IntPtr.Zero)
+                    ? wi.RootHwnd : wi.Hwnd;
+                long k = root.ToInt64();
                 int now = Environment.TickCount;
                 int last;
                 if (_btnSkipLogged.TryGetValue(k, out last) &&
                     unchecked(now - last) >= 0 && unchecked(now - last) < 15000) return;
                 if (_btnSkipLogged.Count > 1000) _btnSkipLogged.Clear();
                 _btnSkipLogged[k] = now;
+                StringBuilder rc = new StringBuilder(256);
+                WinApi.GetClassName(root, rc, 256);
                 Log.Write("SKIP", "правило " + (ruleNo + 1) + ": у формы нет видимых кнопок — игнорируется; " +
-                    wi.Describe());
+                    wi.Describe() + "; корень: класс=" + rc.ToString() +
+                    "; внутри: " + WinApi.DescribeChildren(root, 10));
             }
             catch { }
         }
@@ -1582,7 +1626,7 @@ folder=system\logs
         }
 
         public const string HelpText =
-@"OKTELL WATCH 1.2.2 — сторож формы обратного звонка
+@"OKTELL WATCH 1.2.3 — сторож формы обратного звонка
 ============================================================
 
 ЗАЧЕМ
