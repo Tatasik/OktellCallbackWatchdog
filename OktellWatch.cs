@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.1.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.1")]
+[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.2.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.2")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -700,8 +700,9 @@ visibleOnly=true
 ;   proc!:  процесс НЕ должен содержать (исключение)
 ;   title!: заголовок НЕ должен содержать (исключение)
 ;   class!: класс НЕ должен содержать (исключение)
-;   btn:    true — в окне должна быть видимая кнопка; окна без кнопок
-;           (например, дозвон после подтверждения) игнорируются
+;   btn:    true — у формы, в которой найдено окно, должна быть видимая
+;           кнопка; окна без кнопок (например, дозвон после подтверждения)
+;           игнорируются
 ; Регистр не важен. Совпадение = ВСЕ указанные поля найдены в окне.
 ; Исключения (поля со знаком «!») сужают правило: окно подходит, только
 ; если исключающая подстрока НЕ найдена в окне. Хотя бы один обычный
@@ -711,11 +712,12 @@ visibleOnly=true
 ; Добавлять и убирать правила удобнее через «Диспетчер правил...» в меню
 ; значка у часов — править файл вручную не обязательно.
 
-; Основное правило: процесс Oktell, в заголовке окна есть «зарезерв»
-; (строка «Вы зарезервированы на выполнение задачи» — она есть во всех
-; задачах обратного звонка), в окне есть кнопки — окно дозвона
-; (без кнопок) игнорируется само.
-rule1=proc:oktell;title:зарезерв;btn:true;scope:top
+; Основное правило: процесс Oktell, внутри формы есть элемент с текстом
+; «зарезерв» (строка «Вы зарезервированы на выполнение задачи» — она есть
+; во всех задачах обратного звонка; scope:any ищет её и среди внутренних
+; элементов формы), у формы есть кнопки — окно дозвона (без кнопок)
+; игнорируется само.
+rule1=proc:oktell;title:зарезерв;btn:true;scope:any
 
 ; Примеры (включите галочкой в Диспетчере правил или раскомментируйте):
 ;rule2=proc:oktell;title:перезвон;scope:top
@@ -725,7 +727,7 @@ rule1=proc:oktell;title:зарезерв;btn:true;scope:top
 
 ; То же слово, но без проверки кнопок — на случай, если какая-то нужная
 ; форма окажется с нарисованными вручную (нестандартными) кнопками:
-;rule6=proc:oktell;title:зарезерв;scope:top
+;rule6=proc:oktell;title:зарезерв;scope:any
 
 ; Исключение дозвона: ловим «обратн», но НЕ окна дозвона, которые
 ; появляются после подтверждения звонка (точное слово подскажет
@@ -898,6 +900,7 @@ folder=system\logs
             Dictionary<long, int> ruleOf)
         {
             VisibleOnly = s.VisibleOnly;
+            _btnRootCache.Clear();   // кэш кнопок — заново на каждый проход
             List<WindowInfo> tops = new List<WindowInfo>();
             WinApi.EnumWindows(delegate(IntPtr h, IntPtr lp)
             {
@@ -974,15 +977,31 @@ folder=system\logs
             }
         }
 
-        // Ленивая проверка кнопок окна (один раз на объект окна за проход Collect)
+        // Ленивая проверка кнопок (исправлено в 1.2.2): смысл btn:true —
+        // «у ФОРМЫ задачи есть кнопки, оператор может на неё отреагировать».
+        // Раньше проверка выполнялась над самим найденным окном: у дочернего
+        // элемента (например, метки с текстом задачи) потомков-кнопок не
+        // бывает, поэтому правило с btn:true и scope:any/child никогда
+        // не срабатывало. Теперь кнопки ищем у корневой формы (RootHwnd);
+        // для top-окон это то же самое окно — прежнее поведение не меняется.
+        // Результат кэшируется по корневому окну на один проход Collect.
+        private static readonly Dictionary<long, bool> _btnRootCache =
+            new Dictionary<long, bool>();
+
         private static bool CheckButtons(WindowInfo wi)
         {
-            if (!wi.BtnChecked)
+            IntPtr root = (wi.IsChild && wi.RootHwnd != IntPtr.Zero)
+                ? wi.RootHwnd : wi.Hwnd;
+            long k = root.ToInt64();
+            bool has;
+            if (!_btnRootCache.TryGetValue(k, out has))
             {
-                wi.HasButtons = WinApi.HasButtonChildren(wi.Hwnd);
-                wi.BtnChecked = true;
+                has = WinApi.HasButtonChildren(root);
+                _btnRootCache[k] = has;
             }
-            return wi.HasButtons;
+            wi.HasButtons = has;
+            wi.BtnChecked = true;
+            return has;
         }
 
         // Не спамим в журнал: окно без кнопок живёт долго, а Collect вызывается
@@ -1000,7 +1019,7 @@ folder=system\logs
                     unchecked(now - last) >= 0 && unchecked(now - last) < 15000) return;
                 if (_btnSkipLogged.Count > 1000) _btnSkipLogged.Clear();
                 _btnSkipLogged[k] = now;
-                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": окно без кнопок — игнорируется; " +
+                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": у формы нет видимых кнопок — игнорируется; " +
                     wi.Describe());
             }
             catch { }
@@ -1563,7 +1582,7 @@ folder=system\logs
         }
 
         public const string HelpText =
-@"OKTELL WATCH 1.2.1 — сторож формы обратного звонка
+@"OKTELL WATCH 1.2.2 — сторож формы обратного звонка
 ============================================================
 
 ЗАЧЕМ
