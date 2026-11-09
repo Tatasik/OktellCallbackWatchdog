@@ -43,6 +43,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Windows.Automation;
 using Microsoft.Win32;
 
 // Timer здесь — всегда таймер WinForms (для UI-потока)
@@ -54,9 +55,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.1")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.1")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.1")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -175,6 +176,36 @@ namespace OktellWatch
                 return true;
             }, IntPtr.Zero);
             return found;
+        }
+
+        // Ревизия 2 (1.2.3.1): UIA-фолбэк для «нарисованных» кнопок. Скиновые
+        // формы и формы на движке Chromium (CEF) не создают оконных
+        // контролов-кнопок: HTML-кнопки рисует сам движок, и Win32-перечисление
+        // видит лишь служебные окна. UI Automation такие кнопки показывает
+        // (браузеры и CEF отдают HTML-элементы в дерево доступности для
+        // скринридеров). Вызывается только если Win32-поиск ничего не нашёл.
+        [DllImport("ole32.dll")]
+        private static extern int CoInitializeEx(IntPtr pvReserved, uint coInit);
+        [DllImport("ole32.dll")]
+        private static extern void CoUninitialize();
+
+        // Есть ли среди элементов доступности окна хотя бы одна кнопка.
+        public static bool HasUiAButton(IntPtr h)
+        {
+            if (h == IntPtr.Zero || !IsWindow(h)) return false;
+            int hr = CoInitializeEx(IntPtr.Zero, 0); // COINIT_MULTITHREADED
+            bool own = (hr == 0 || hr == 1);         // S_OK / S_FALSE — инициализировали мы
+            try
+            {
+                AutomationElement root = AutomationElement.FromHandle(h);
+                if (root == null) return false;
+                AutomationElement btn = root.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty,
+                                          ControlType.Button));
+                return btn != null;
+            }
+            catch { return false; }
+            finally { if (own) CoUninitialize(); }
         }
 
         // Диагностика btn:true (1.2.3): состав внутренних окон для журнала —
@@ -737,8 +768,9 @@ visibleOnly=true
 ;   title!: заголовок НЕ должен содержать (исключение)
 ;   class!: класс НЕ должен содержать (исключение)
 ;   btn:    true — у формы, в которой найдено окно, должна быть видимая
-;           кнопка; окна без кнопок (например, дозвон после подтверждения)
-;           игнорируются
+;           кнопка (Win32-контрол или HTML/Chromium-кнопка через
+;           UI Automation); окна без кнопок (например, дозвон после
+;           подтверждения) игнорируются
 ; Регистр не важен. Совпадение = ВСЕ указанные поля найдены в окне.
 ; Исключения (поля со знаком «!») сужают правило: окно подходит, только
 ; если исключающая подстрока НЕ найдена в окне. Хотя бы один обычный
@@ -1020,9 +1052,22 @@ folder=system\logs
         // бывает, поэтому правило с btn:true и scope:any/child никогда
         // не срабатывало. Теперь кнопки ищем у корневой формы (RootHwnd);
         // для top-окон это то же самое окно — прежнее поведение не меняется.
-        // Результат кэшируется по корневому окну на один проход Collect.
+        // Результат кэшируется по корневому окну на один проход Collect;
+        // с ревизии 2 (1.2.3.1) при отсутствии Win32-кнопок форма
+        // дополнительно проверяется через UI Automation (см. ниже).
         private static readonly Dictionary<long, bool> _btnRootCache =
             new Dictionary<long, bool>();
+
+        // Ревизия 2: UIA-проба кнопок. Положительный результат кэшируется
+        // навсегда («форма без Win32-кнопок, но с HTML-кнопками» — стабильное
+        // состояние), отрицательный перепроверяется с нарастающим интервалом,
+        // т.к. Chromium строит дерево доступности после показа формы.
+        private static readonly Dictionary<long, bool> _btnUiAOk =
+            new Dictionary<long, bool>();
+        private static readonly Dictionary<long, int> _btnUiAProbe =
+            new Dictionary<long, int>();
+        private static readonly Dictionary<long, int> _btnUiAProbes =
+            new Dictionary<long, int>();
 
         private static bool CheckButtons(WindowInfo wi)
         {
@@ -1033,11 +1078,45 @@ folder=system\logs
             if (!_btnRootCache.TryGetValue(k, out has))
             {
                 has = WinApi.HasButtonChildren(root);
+                if (!has) has = CheckButtonsUiA(root, k); // ревизия 2: UIA-фолбэк
                 _btnRootCache[k] = has;
             }
             wi.HasButtons = has;
             wi.BtnChecked = true;
             return has;
+        }
+
+        // UIA-проба кнопок (ревизия 2): позитив кэшируется навсегда, негатив
+        // перепроверяется с нарастающим интервалом 500 мс → 16 с (Chromium
+        // строит дерево доступности после показа формы — первый запрос
+        // может ничего не найти).
+        private static bool CheckButtonsUiA(IntPtr root, long key)
+        {
+            int now = Environment.TickCount;
+            bool ok;
+            if (_btnUiAOk.TryGetValue(key, out ok) && ok) return true;
+            int last, cnt = 0;
+            if (_btnUiAProbe.TryGetValue(key, out last))
+            {
+                _btnUiAProbes.TryGetValue(key, out cnt);
+                int interval = 500 << Math.Min(cnt, 5);  // 0,5 / 1 / 2 / 4 / 8 / 16 с
+                if (unchecked(now - last) >= 0 && unchecked(now - last) < interval)
+                    return false;
+            }
+            if (_btnUiAProbe.Count > 1000)
+            {
+                _btnUiAOk.Clear(); _btnUiAProbe.Clear(); _btnUiAProbes.Clear();
+            }
+            _btnUiAProbe[key] = now;
+            _btnUiAProbes[key] = cnt + 1;
+            bool found = WinApi.HasUiAButton(root);
+            if (found)
+            {
+                _btnUiAOk[key] = true;
+                Log.Write("BTN", "кнопки формы найдены через UIA (Win32-контролов нет — Chromium/HTML); корень " +
+                    root.ToInt64().ToString("X"));
+            }
+            return found;
         }
 
         // Не спамим в журнал: окно без кнопок живёт долго, а Collect вызывается
@@ -1062,7 +1141,7 @@ folder=system\logs
                 _btnSkipLogged[k] = now;
                 StringBuilder rc = new StringBuilder(256);
                 WinApi.GetClassName(root, rc, 256);
-                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": у формы нет видимых кнопок — игнорируется; " +
+                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": у формы нет видимых кнопок (проверены Win32 и UIA) — игнорируется; " +
                     wi.Describe() + "; корень: класс=" + rc.ToString() +
                     "; внутри: " + WinApi.DescribeChildren(root, 10));
             }
@@ -1673,7 +1752,8 @@ folder=system\logs
    proc!:  процесс НЕ должен содержать (исключение, с 1.2)
    title!: заголовок НЕ должен содержать (исключение, с 1.2)
    class!: класс НЕ должен содержать (исключение, с 1.2)
-   btn:    true — в окне должна быть видимая кнопка; окна без кнопок
+   btn:    true — в окне должна быть видимая кнопка (Win32-контрол или
+           HTML/Chromium-кнопка через UI Automation); окна без кнопок
            (дозвон после подтверждения и т.п.) игнорируются — оператор
            всё равно не может на них отреагировать
 • Регистр не важен; совпадение = ВСЕ указанные поля найдены в окне.
