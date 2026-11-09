@@ -21,21 +21,8 @@ rem Иконка EXE-файла (если OktellWatch.ico рядом — вши�
 set ICON=
 if exist OktellWatch.ico set ICON=/win32icon:OktellWatch.ico
 
-rem UI Automation (ревизия 2: btn:true видит и HTML/Chromium-кнопки).
-rem Сначала ищем сборки рядом с компилятором, затем — в GAC (.NET 4.x).
-set UIAC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\UIAutomationClient.dll
-if not exist "%UIAC%" set UIAC=%WINDIR%\Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll
-set UIAT=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\UIAutomationTypes.dll
-if not exist "%UIAT%" set UIAT=%WINDIR%\Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll
-if not exist "%UIAC%" (
-  echo [ERROR] UIAutomationClient.dll not found - .NET Framework 4.x required.
-  pause
-  exit /b 1
-)
-
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ %ICON% ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
-  /r:"%UIAC%" /r:"%UIAT%" ^
   /out:OktellWatch.exe OktellWatch.cs
 
 if errorlevel 1 (

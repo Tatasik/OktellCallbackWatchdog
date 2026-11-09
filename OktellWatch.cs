@@ -43,7 +43,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
-using System.Windows.Automation;
 using Microsoft.Win32;
 
 // Timer здесь — всегда таймер WinForms (для UI-потока)
@@ -55,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.1")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.1")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.1")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.2")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.2")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.2")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -150,100 +149,6 @@ namespace OktellWatch
         [DllImport("winmm.dll", CharSet = CharSet.Auto)]
         public static extern bool PlaySound(string pszSound, IntPtr hmod, int fdwSound);
 
-        // Перечисление дочерних окон — уже объявлено выше (EnumChildWindows
-        // с делегатом EnumProc), здесь только поиск видимых кнопок в форме.
-        // Есть ли в окне хотя бы одна видимая кнопка (класс содержит BUTTON/BTN:
-        // Win32 Button, WinForms WindowsForms10.BUTTON..., VCL TButton/TBitBtn).
-        // Окно дозвона и прочие «информационные» окна кнопок не имеют — оператор
-        // не может на них отреагировать, поэтому правило с btn:true их игнорирует.
-        public static bool HasButtonChildren(IntPtr h)
-        {
-            if (h == IntPtr.Zero || !IsWindow(h)) return false;
-            bool found = false;
-            EnumChildWindows(h, delegate(IntPtr ch, IntPtr lp)
-            {
-                try
-                {
-                    if (IsWindowVisible(ch))
-                    {
-                        StringBuilder cls = new StringBuilder(256);
-                        GetClassName(ch, cls, 256);
-                        string c = cls.ToString().ToLowerInvariant();
-                        if (c.Contains("button") || c.Contains("btn")) { found = true; return false; }
-                    }
-                }
-                catch { }
-                return true;
-            }, IntPtr.Zero);
-            return found;
-        }
-
-        // Ревизия 2 (1.2.3.1): UIA-фолбэк для «нарисованных» кнопок. Скиновые
-        // формы и формы на движке Chromium (CEF) не создают оконных
-        // контролов-кнопок: HTML-кнопки рисует сам движок, и Win32-перечисление
-        // видит лишь служебные окна. UI Automation такие кнопки показывает
-        // (браузеры и CEF отдают HTML-элементы в дерево доступности для
-        // скринридеров). Вызывается только если Win32-поиск ничего не нашёл.
-        [DllImport("ole32.dll")]
-        private static extern int CoInitializeEx(IntPtr pvReserved, uint coInit);
-        [DllImport("ole32.dll")]
-        private static extern void CoUninitialize();
-
-        // Есть ли среди элементов доступности окна хотя бы одна кнопка.
-        public static bool HasUiAButton(IntPtr h)
-        {
-            if (h == IntPtr.Zero || !IsWindow(h)) return false;
-            int hr = CoInitializeEx(IntPtr.Zero, 0); // COINIT_MULTITHREADED
-            bool own = (hr == 0 || hr == 1);         // S_OK / S_FALSE — инициализировали мы
-            try
-            {
-                AutomationElement root = AutomationElement.FromHandle(h);
-                if (root == null) return false;
-                AutomationElement btn = root.FindFirst(TreeScope.Descendants,
-                    new PropertyCondition(AutomationElement.ControlTypeProperty,
-                                          ControlType.Button));
-                return btn != null;
-            }
-            catch { return false; }
-            finally { if (own) CoUninitialize(); }
-        }
-
-        // Диагностика btn:true (1.2.3): состав внутренних окон для журнала —
-        // «класс|текст», до max штук; скрытые помечены [скрыт]. По этой картине
-        // видно, являются ли кнопки скиновой формы оконными контролами или
-        // нарисованы на скине (тогда btn:true на форме не сработает).
-        public static string DescribeChildren(IntPtr h, int max)
-        {
-            if (h == IntPtr.Zero || !IsWindow(h)) return "";
-            StringBuilder sb = new StringBuilder();
-            int n = 0;
-            EnumChildWindows(h, delegate(IntPtr ch, IntPtr lp)
-            {
-                if (n >= max) return false;
-                try
-                {
-                    StringBuilder cls = new StringBuilder(256);
-                    GetClassName(ch, cls, 256);
-                    int len = GetWindowTextLength(ch);
-                    string t = "";
-                    if (len > 0)
-                    {
-                        StringBuilder tb = new StringBuilder(len + 2);
-                        GetWindowText(ch, tb, tb.Capacity);
-                        t = tb.ToString();
-                        if (t.Length > 40) t = t.Substring(0, 40);
-                    }
-                    if (sb.Length > 0) sb.Append("; ");
-                    if (!IsWindowVisible(ch)) sb.Append("[скрыт]");
-                    sb.Append(cls.ToString()).Append("|").Append(t);
-                    n++;
-                }
-                catch { }
-                return true;
-            }, IntPtr.Zero);
-            return sb.ToString();
-        }
-
         public static void EnableDpiAware()
         {
             try { SetProcessDPIAware(); } catch { }
@@ -313,8 +218,6 @@ namespace OktellWatch
         public string Title = "";
         public string ProcessName = "";
         public int Pid;
-        public bool HasButtons;  // есть видимая кнопка среди дочерних окон (заполняет Collector)
-        public bool BtnChecked;  // кнопки уже проверены в этом проходе Collect
 
         public string Describe()
         {
@@ -331,6 +234,8 @@ namespace OktellWatch
     // Исключения (с 1.2): proc!:...;title!:...;class!:... — поле НЕ должно
     // найтись в окне. Работают вместе с обычными признаками: правило
     // срабатывает, только если ни одно исключение не найдено.
+    // Параметр btn: из конфигов до 1.2.3.2 игнорируется (проверка кнопок
+    // снята с поддержки: наблюдение работает по текстовым приметам окна).
     internal class WatchRule
     {
         public string Proc;
@@ -342,7 +247,6 @@ namespace OktellWatch
         public string Scope = "top";
         public string Raw = "";
         public bool Enabled = true;   // false = правило отключено (off=true)
-        public bool RequireButtons;  // btn:true — в окне должна быть видимая кнопка
 
         public static WatchRule Parse(string raw)
         {
@@ -371,11 +275,6 @@ namespace OktellWatch
                 else if (k == "proc!") r.NotProc = v;
                 else if (k == "title!") r.NotTitle = v;
                 else if (k == "class!") r.NotClass = v;
-                else if (k == "btn")
-                {
-                    string bv = v.ToLowerInvariant();
-                    r.RequireButtons = (bv == "1" || bv == "true" || bv == "on" || bv == "yes");
-                }
                 else if (k == "scope") r.Scope = v.ToLowerInvariant();
                 else if (k == "off")
                 {
@@ -391,14 +290,6 @@ namespace OktellWatch
         }
 
         public bool Matches(WindowInfo w)
-        {
-            if (!MatchesBase(w)) return false;
-            // btn:true: окно без кнопок оператор обработать не может — не цель
-            return !RequireButtons || w.HasButtons;
-        }
-
-        // Все проверки, кроме кнопок (нужно для журнала «пропущено: нет кнопок»)
-        public bool MatchesBase(WindowInfo w)
         {
             if (!Enabled) return false;
             string sc = Str.Lo(Scope);
@@ -422,7 +313,6 @@ namespace OktellWatch
                    (Str.IsEmpty(NotProc) ? "" : " proc!~" + NotProc) +
                    (Str.IsEmpty(NotTitle) ? "" : " title!~" + NotTitle) +
                    (Str.IsEmpty(NotClass) ? "" : " class!~" + NotClass) +
-                   (RequireButtons ? " btn:true" : "") +
                    " scope=" + (Scope == null ? "top" : Scope);
         }
 
@@ -437,7 +327,6 @@ namespace OktellWatch
             if (!Str.IsEmpty(NotProc)) sb.Append("proc!:").Append(NotProc.Trim()).Append(';');
             if (!Str.IsEmpty(NotTitle)) sb.Append("title!:").Append(NotTitle.Trim()).Append(';');
             if (!Str.IsEmpty(NotClass)) sb.Append("class!:").Append(NotClass.Trim()).Append(';');
-            if (RequireButtons) sb.Append("btn:true;");
             sb.Append("scope:").Append(Str.IsEmpty(Scope) ? "top" : Scope.Trim().ToLowerInvariant());
             return sb.ToString();
         }
@@ -464,7 +353,6 @@ namespace OktellWatch
             if (!Str.IsEmpty(NotProc)) p.Add("процесс НЕ ~«" + NotProc.Trim() + "»");
             if (!Str.IsEmpty(NotTitle)) p.Add("заголовок НЕ ~«" + NotTitle.Trim() + "»");
             if (!Str.IsEmpty(NotClass)) p.Add("класс НЕ ~«" + NotClass.Trim() + "»");
-            if (RequireButtons) p.Add("в окне есть кнопки (без кнопок — игнорировать)");
             string sc = Str.Lo(Scope);
             if (sc == "child") p.Add("только вложенные окна");
             else if (sc == "any") p.Add("главные и вложенные окна");
@@ -767,10 +655,6 @@ visibleOnly=true
 ;   proc!:  процесс НЕ должен содержать (исключение)
 ;   title!: заголовок НЕ должен содержать (исключение)
 ;   class!: класс НЕ должен содержать (исключение)
-;   btn:    true — у формы, в которой найдено окно, должна быть видимая
-;           кнопка (Win32-контрол или HTML/Chromium-кнопка через
-;           UI Automation); окна без кнопок (например, дозвон после
-;           подтверждения) игнорируются
 ; Регистр не важен. Совпадение = ВСЕ указанные поля найдены в окне.
 ; Исключения (поля со знаком «!») сужают правило: окно подходит, только
 ; если исключающая подстрока НЕ найдена в окне. Хотя бы один обычный
@@ -783,19 +667,14 @@ visibleOnly=true
 ; Основное правило: процесс Oktell, внутри формы есть элемент с текстом
 ; «зарезерв» (строка «Вы зарезервированы на выполнение задачи» — она есть
 ; во всех задачах обратного звонка; scope:any ищет её и среди внутренних
-; элементов формы), у формы есть кнопки — окно дозвона (без кнопок)
-; игнорируется само.
-rule1=proc:oktell;title:зарезерв;btn:true;scope:any
+; элементов формы).
+rule1=proc:oktell;title:зарезерв;scope:any
 
 ; Примеры (включите галочкой в Диспетчере правил или раскомментируйте):
 ;rule2=proc:oktell;title:перезвон;scope:top
 ;rule3=proc:oktell;title:заказ звонка;scope:top
 ;rule4=proc:oktell;title:забронир;scope:top
 ;rule5=proc:oktell;title:обратн;scope:child
-
-; То же слово, но без проверки кнопок — на случай, если какая-то нужная
-; форма окажется с нарисованными вручную (нестандартными) кнопками:
-;rule6=proc:oktell;title:зарезерв;scope:any
 
 ; Исключение дозвона: ловим «обратн», но НЕ окна дозвона, которые
 ; появляются после подтверждения звонка (точное слово подскажет
@@ -968,7 +847,6 @@ folder=system\logs
             Dictionary<long, int> ruleOf)
         {
             VisibleOnly = s.VisibleOnly;
-            _btnRootCache.Clear();   // кэш кнопок — заново на каждый проход
             List<WindowInfo> tops = new List<WindowInfo>();
             WinApi.EnumWindows(delegate(IntPtr h, IntPtr lp)
             {
@@ -990,13 +868,6 @@ folder=system\logs
                     for (int i = 0; i < tops.Count; i++)
                     {
                         WindowInfo wi = tops[i];
-                        // btn:true: окно без кнопок оператор обработать не может —
-                        // не цель; но если остальные приметы совпали — пишем в журнал
-                        if (r.RequireButtons && !CheckButtons(wi))
-                        {
-                            if (r.MatchesBase(wi)) LogSkipButtons(ri, wi);
-                            continue;
-                        }
                         if (r.Matches(wi))
                         {
                             long k = wi.Hwnd.ToInt64();
@@ -1023,12 +894,7 @@ folder=system\logs
                             if (ci != null)
                             {
                                 ci.RootHwnd = top.Hwnd;
-                                bool skip = r.RequireButtons && !CheckButtons(ci);
-                                if (skip)
-                                {
-                                    if (r.MatchesBase(ci)) LogSkipButtons(ri, ci);
-                                }
-                                else if (r.Matches(ci))
+                                if (r.Matches(ci))
                                 {
                                     long k = ch.ToInt64();
                                     if (!found.ContainsKey(k))
@@ -1045,108 +911,7 @@ folder=system\logs
             }
         }
 
-        // Ленивая проверка кнопок (исправлено в 1.2.2): смысл btn:true —
-        // «у ФОРМЫ задачи есть кнопки, оператор может на неё отреагировать».
-        // Раньше проверка выполнялась над самим найденным окном: у дочернего
-        // элемента (например, метки с текстом задачи) потомков-кнопок не
-        // бывает, поэтому правило с btn:true и scope:any/child никогда
-        // не срабатывало. Теперь кнопки ищем у корневой формы (RootHwnd);
-        // для top-окон это то же самое окно — прежнее поведение не меняется.
-        // Результат кэшируется по корневому окну на один проход Collect;
-        // с ревизии 2 (1.2.3.1) при отсутствии Win32-кнопок форма
-        // дополнительно проверяется через UI Automation (см. ниже).
-        private static readonly Dictionary<long, bool> _btnRootCache =
-            new Dictionary<long, bool>();
 
-        // Ревизия 2: UIA-проба кнопок. Положительный результат кэшируется
-        // навсегда («форма без Win32-кнопок, но с HTML-кнопками» — стабильное
-        // состояние), отрицательный перепроверяется с нарастающим интервалом,
-        // т.к. Chromium строит дерево доступности после показа формы.
-        private static readonly Dictionary<long, bool> _btnUiAOk =
-            new Dictionary<long, bool>();
-        private static readonly Dictionary<long, int> _btnUiAProbe =
-            new Dictionary<long, int>();
-        private static readonly Dictionary<long, int> _btnUiAProbes =
-            new Dictionary<long, int>();
-
-        private static bool CheckButtons(WindowInfo wi)
-        {
-            IntPtr root = (wi.IsChild && wi.RootHwnd != IntPtr.Zero)
-                ? wi.RootHwnd : wi.Hwnd;
-            long k = root.ToInt64();
-            bool has;
-            if (!_btnRootCache.TryGetValue(k, out has))
-            {
-                has = WinApi.HasButtonChildren(root);
-                if (!has) has = CheckButtonsUiA(root, k); // ревизия 2: UIA-фолбэк
-                _btnRootCache[k] = has;
-            }
-            wi.HasButtons = has;
-            wi.BtnChecked = true;
-            return has;
-        }
-
-        // UIA-проба кнопок (ревизия 2): позитив кэшируется навсегда, негатив
-        // перепроверяется с нарастающим интервалом 500 мс → 16 с (Chromium
-        // строит дерево доступности после показа формы — первый запрос
-        // может ничего не найти).
-        private static bool CheckButtonsUiA(IntPtr root, long key)
-        {
-            int now = Environment.TickCount;
-            bool ok;
-            if (_btnUiAOk.TryGetValue(key, out ok) && ok) return true;
-            int last, cnt = 0;
-            if (_btnUiAProbe.TryGetValue(key, out last))
-            {
-                _btnUiAProbes.TryGetValue(key, out cnt);
-                int interval = 500 << Math.Min(cnt, 5);  // 0,5 / 1 / 2 / 4 / 8 / 16 с
-                if (unchecked(now - last) >= 0 && unchecked(now - last) < interval)
-                    return false;
-            }
-            if (_btnUiAProbe.Count > 1000)
-            {
-                _btnUiAOk.Clear(); _btnUiAProbe.Clear(); _btnUiAProbes.Clear();
-            }
-            _btnUiAProbe[key] = now;
-            _btnUiAProbes[key] = cnt + 1;
-            bool found = WinApi.HasUiAButton(root);
-            if (found)
-            {
-                _btnUiAOk[key] = true;
-                Log.Write("BTN", "кнопки формы найдены через UIA (Win32-контролов нет — Chromium/HTML); корень " +
-                    root.ToInt64().ToString("X"));
-            }
-            return found;
-        }
-
-        // Не спамим в журнал: окно без кнопок живёт долго, а Collect вызывается
-        // и хуком (раз в 250 мс), и опросом — пишем не чаще раза в 15 секунд,
-        // ключ — корневое окно формы (с 1.2.3). В запись включён состав формы:
-        // класс корня и список внутренних окон «класс|текст» — по ней видно,
-        // есть ли на форме оконные контролы-кнопки или они нарисованы на скине.
-        private static readonly Dictionary<long, int> _btnSkipLogged = new Dictionary<long, int>();
-
-        private static void LogSkipButtons(int ruleNo, WindowInfo wi)
-        {
-            try
-            {
-                IntPtr root = (wi.IsChild && wi.RootHwnd != IntPtr.Zero)
-                    ? wi.RootHwnd : wi.Hwnd;
-                long k = root.ToInt64();
-                int now = Environment.TickCount;
-                int last;
-                if (_btnSkipLogged.TryGetValue(k, out last) &&
-                    unchecked(now - last) >= 0 && unchecked(now - last) < 15000) return;
-                if (_btnSkipLogged.Count > 1000) _btnSkipLogged.Clear();
-                _btnSkipLogged[k] = now;
-                StringBuilder rc = new StringBuilder(256);
-                WinApi.GetClassName(root, rc, 256);
-                Log.Write("SKIP", "правило " + (ruleNo + 1) + ": у формы нет видимых кнопок (проверены Win32 и UIA) — игнорируется; " +
-                    wi.Describe() + "; корень: класс=" + rc.ToString() +
-                    "; внутри: " + WinApi.DescribeChildren(root, 10));
-            }
-            catch { }
-        }
     }
 
     // ----------------------------------------------------------- CaptureOverlay
@@ -1752,10 +1517,6 @@ folder=system\logs
    proc!:  процесс НЕ должен содержать (исключение, с 1.2)
    title!: заголовок НЕ должен содержать (исключение, с 1.2)
    class!: класс НЕ должен содержать (исключение, с 1.2)
-   btn:    true — в окне должна быть видимая кнопка (Win32-контрол или
-           HTML/Chromium-кнопка через UI Automation); окна без кнопок
-           (дозвон после подтверждения и т.п.) игнорируются — оператор
-           всё равно не может на них отреагировать
 • Регистр не важен; совпадение = ВСЕ указанные поля найдены в окне.
 • Исключения (со знаком «!») сужают правило: окно подходит, только
   если исключающая подстрока НЕ найдена. Например, ловим «обратн»,
@@ -1783,8 +1544,8 @@ folder=system\logs
 Журнал: system\logs рядом с программой, файл OktellWatch_ГГГГММДД.log
 (папку можно поменять: [log] folder= в config.ini).
 События: START, DETECTED (форма найдена), ALERT / RE-ALERT (сигналы),
-CLOSED (форма обработана/закрыта), SKIP (окно без кнопок проигнорировано),
-SOUND (звук остановлен), CONFIG (изменения настроек), PAUSE / RESUME,
+CLOSED (форма обработана/закрыта), SOUND (звук остановлен), CONFIG
+(изменения настроек), PAUSE / RESUME,
 ERROR.
 
 АВТОЗАПУСК
@@ -1838,7 +1599,6 @@ config.ini можно править в Блокноте прямо во вре�
         private readonly CheckBox _ckNotProc;
         private readonly CheckBox _ckNotTitle;
         private readonly CheckBox _ckNotClass;
-        private readonly CheckBox _ckButtons;
         private readonly ComboBox _cbScope;
         private readonly Label _lblPreview;
         private readonly bool _wasEnabled;
@@ -1870,17 +1630,6 @@ config.ini можно править в Блокноте прямо во вре�
             _tbClass = AddField("Класс окна содержит:",
                 seed == null ? "" : Clean(seed.Class),
                 seed != null && !Str.IsEmpty(seed.NotClass), ref y, out _ckNotClass);
-
-            // окна без кнопок (дозвон и т.п.) оператор обработать не может —
-            // с галочкой такие окна правилом игнорируются
-            _ckButtons = new CheckBox();
-            _ckButtons.Text = "В окне должны быть кнопки (окна без кнопок игнорировать)";
-            _ckButtons.AutoSize = true;
-            _ckButtons.Checked = seed != null && seed.RequireButtons;
-            _ckButtons.Location = new Point(14, y + 2);
-            _ckButtons.CheckedChanged += delegate { UpdatePreview(); };
-            Controls.Add(_ckButtons);
-            y += _ckButtons.Height + 8;
 
             Label l4 = new Label();
             l4.Text = "Где искать:";
@@ -2011,7 +1760,6 @@ config.ini можно править в Блокноте прямо во вре�
                 sb.Append(_ckNotTitle.Checked ? "title!:" : "title:").Append(title).Append(';');
             if (cls.Length > 0)
                 sb.Append(_ckNotClass.Checked ? "class!:" : "class:").Append(cls).Append(';');
-            if (_ckButtons.Checked) sb.Append("btn:true;");
             sb.Append("scope:").Append(ScopeValue());
             return WatchRule.Parse(sb.ToString());
         }
