@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.6")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.6")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.6")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.7")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.7")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.7")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -264,6 +264,10 @@ namespace OktellWatch
         public string Scope = "top";
         public string Raw = "";
         public bool Enabled = true;   // false = правило отключено (off=true)
+        // С 1.2.3.7: фрагменты правила с неизвестными ключами («titl:» из
+        // опечатки и т.п.) больше не выбрасываются молча — загрузщик пишет
+        // их в журнал; правило при этом разбирается как раньше
+        public List<string> Warnings = new List<string>();
 
         public static WatchRule Parse(string raw)
         {
@@ -283,7 +287,12 @@ namespace OktellWatch
                     continue;
                 }
                 int c = p.IndexOf(':');
-                if (c <= 0) continue;
+                if (c <= 0)
+                {
+                    // с 1.2.3.7 фрагмент без ключа не исчезает молча
+                    r.Warnings.Add("фрагмент \"" + p + "\" без ключа — проигнорирован");
+                    continue;
+                }
                 string k = p.Substring(0, c).Trim().ToLowerInvariant();
                 string v = p.Substring(c + 1).Trim();
                 if (k == "proc") r.Proc = v;
@@ -297,6 +306,19 @@ namespace OktellWatch
                 {
                     string lv = v.ToLowerInvariant();
                     r.Enabled = !(lv == "1" || lv == "true" || lv == "on" || lv == "yes");
+                }
+                else if (k == "btn" || k == "btn!")
+                {
+                    // параметр btn: снят с поддержки (1.2.3.2) — игнорируем
+                    // молча, чтобы старые конфиги не сыпали предупреждениями
+                }
+                else
+                {
+                    // с 1.2.3.7: неизвестный ключ («titl:» из опечатки) больше
+                    // не превращает правило молча в «все окна процесса» —
+                    // загрузщик запишет фрагмент в журнал
+                    r.Warnings.Add("неизвестный ключ \"" + k + ":\" (фрагмент \"" +
+                        p + "\") — сегмент проигнорирован, проверьте написание");
                 }
             }
             // хотя бы один ОБЫЧНЫЙ признак обязателен (правило только из
@@ -605,6 +627,9 @@ namespace OktellWatch
         public IniFile Ini;
         public DateTime Stamp;
         public List<string> BadRules = new List<string>();
+        // С 1.2.3.7: предупреждения о неизвестных ключах в разобранных
+        // правилах (строки, не разобравшиеся целиком, — в BadRules)
+        public List<string> RuleWarnings = new List<string>();
 
         public int PollIntervalMs = 1000;
         public bool UseHooks = true;       // мгновенное обнаружение по событиям Windows
@@ -675,13 +700,19 @@ namespace OktellWatch
 
             Rules.Clear();
             BadRules.Clear();
+            RuleWarnings.Clear();
             List<KeyValuePair<string, string>> items = Ini.SectionItems("watch");
             for (int i = 0; i < items.Count; i++)
             {
                 string k = items[i].Key.ToLowerInvariant();
                 if (!k.StartsWith("rule")) continue;
                 WatchRule r = WatchRule.Parse(items[i].Value);
-                if (r != null) Rules.Add(r);
+                if (r != null)
+                {
+                    Rules.Add(r);
+                    for (int w = 0; w < r.Warnings.Count; w++)
+                        RuleWarnings.Add(items[i].Key + ": " + r.Warnings[w]);
+                }
                 else BadRules.Add(items[i].Key + "=" + items[i].Value);
             }
         }
@@ -2327,6 +2358,8 @@ config.ini можно править в Блокноте прямо во вре�
                                     "старый файл оставлен на месте (можно удалить)");
             for (int i = 0; i < _settings.BadRules.Count; i++)
                 Log.Write("CONFIG", "не удалось разобрать правило: " + _settings.BadRules[i]);
+            for (int i = 0; i < _settings.RuleWarnings.Count; i++)
+                Log.Write("CONFIG", "внимание: " + _settings.RuleWarnings[i]);
 
             _timer = new Timer();
             _timer.Interval = Clamp(_settings.PollIntervalMs, 250, 60000);
@@ -2924,6 +2957,20 @@ config.ini можно править в Блокноте прямо во вре�
                     n++;
                     _settings.Ini.SetValue("watch", "rule" + n, raw);
                 }
+                // С 1.2.3.7: строки, которые не удалось разобрать при загрузке,
+                // больше не стираются при сохранении — пишутся обратно как есть
+                // (пересобрать их из полей нельзя: значения программе неизвестны)
+                int savedBad = 0;
+                for (int i = 0; i < _settings.BadRules.Count; i++)
+                {
+                    string line = _settings.BadRules[i];
+                    int eq = line.IndexOf('=');
+                    string val = (eq >= 0 ? line.Substring(eq + 1) : line).Trim();
+                    if (val.Length == 0) continue;
+                    n++;
+                    _settings.Ini.SetValue("watch", "rule" + n, val);
+                    savedBad++;
+                }
                 _settings.Ini.Reload();
                 _settings.ReadAll();
                 ApplyLogSettings();
@@ -2931,7 +2978,10 @@ config.ini можно править в Блокноте прямо во вре�
                 if (!_settings.UseHooks && _hook != IntPtr.Zero) UninstallHook();
                 ApplyScanPolicy();
                 RefreshStamp();
-                Log.Write("CONFIG", "правила сохранены через диспетчер; всего: " + n);
+                Log.Write("CONFIG", "правила сохранены через диспетчер; всего: " + n +
+                    (savedBad > 0
+                        ? "; не разобранных при загрузке сохранено как есть: " + savedBad
+                        : ""));
                 return true;
             }
             catch (Exception ex)
