@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.7")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.7")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.7")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.8")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.8")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.8")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -99,6 +99,18 @@ namespace OktellWatch
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr h);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+
+        // Дешёвое имя процесса (с 1.2.3.8, Р1): OpenProcess +
+        // QueryFullProcessImageName вместо Process.GetProcessById, который
+        // на каждый PID дважды перебирает ВСЕ процессы системы
+        // (EnumProcesses + NtQuerySystemInformation, см. reference source)
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder sb, ref int size);
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -194,10 +206,21 @@ namespace OktellWatch
 
         public static string Lo(string s) { return s == null ? "" : s.Trim().ToLowerInvariant(); }
 
+        // С 1.2.3.8 (Р4): поиск без аллокаций. Раньше обе строки на каждом
+        // сравнении прогонялись через Trim+ToLowerInvariant — на каждое поле
+        // каждого окна создавались две временные строки; при обходе дерева
+        // Oktell (сотни элементов) это заметный мусор в gen0.
+        // IndexOf(OrdinalIgnoreCase) ищет ту же подстроку без учёта регистра
+        // и ничего не аллоцирует. Обрезка иглы по краям сохранена; обрезка
+        // «where» на результат не влияет: подстрока обрезанной строки есть
+        // и в исходной (игла без пробельных краёв не может пересечь их).
         public static bool ContainsIC(string where, string what)
         {
             if (IsEmpty(what)) return true;
-            return Lo(where).Contains(Lo(what));
+            if (String.IsNullOrEmpty(where)) return false;
+            what = what.Trim();
+            if (what.Length == 0) return true;
+            return where.IndexOf(what, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public static string TrimTo(string s, int n)
@@ -440,6 +463,7 @@ namespace OktellWatch
     {
         private readonly string _path;
         private List<string> _lines = new List<string>();
+        private int _batch;
 
         public IniFile(string path)
         {
@@ -476,9 +500,42 @@ namespace OktellWatch
             }
         }
 
+        // С 1.2.3.8 (Р5) запись атомарная: сначала во временный файл в той
+        // же папке, затем File.Replace с сохранением .bak. Прежняя прямая
+        // запись оставляла конфиг обрезанным, если процесс падал или
+        // пропадало питание посреди записи. Отказ подмены возможен только
+        // на не-NTFS или при занятом файле — тогда прежняя прямая запись.
         public void Save()
         {
-            File.WriteAllText(_path, String.Join(Environment.NewLine, _lines.ToArray()) + Environment.NewLine, Encoding.UTF8);
+            string text = String.Join(Environment.NewLine, _lines.ToArray()) + Environment.NewLine;
+            string tmp = _path + ".tmp";
+            try
+            {
+                if (File.Exists(_path))
+                {
+                    File.WriteAllText(tmp, text, Encoding.UTF8);
+                    File.Replace(tmp, _path, _path + ".bak");
+                }
+                else
+                {
+                    File.WriteAllText(_path, text, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+                File.WriteAllText(_path, text, Encoding.UTF8);
+                try { File.Delete(tmp); } catch { }
+            }
+        }
+
+        // Группировка изменений (с 1.2.3.8, Р5): между BeginUpdate/EndUpdate
+        // SetValue/DeleteKey не переписывают файл на каждом шаге — сохранение
+        // правил раньше вызывало ~20 перезаписей подряд, и между ними файл
+        // существовал БЕЗ правил (сбой в этот момент терял конфигурацию)
+        public void BeginUpdate() { _batch++; }
+        public void EndUpdate()
+        {
+            if (_batch > 0) { _batch--; if (_batch == 0) Save(); }
         }
 
         public string Get(string section, string key, string def)
@@ -575,7 +632,7 @@ namespace OktellWatch
                     if (eq > 0 && String.Equals(line.Substring(0, eq).Trim(), key, StringComparison.OrdinalIgnoreCase))
                     {
                         _lines[i] = key + "=" + value;
-                        Save();
+                        if (_batch == 0) Save();
                         return;
                     }
                 }
@@ -591,7 +648,7 @@ namespace OktellWatch
             {
                 _lines.Insert(insertAt, key + "=" + value);
             }
-            Save();
+            if (_batch == 0) Save();
         }
 
         // Удалить ключ из секции (первое вхождение). Вернёт true, если удалён.
@@ -612,7 +669,7 @@ namespace OktellWatch
                 if (eq > 0 && String.Equals(line.Substring(0, eq).Trim(), key, StringComparison.OrdinalIgnoreCase))
                 {
                     _lines.RemoveAt(i);
-                    Save();
+                    if (_batch == 0) Save();
                     return true;
                 }
             }
@@ -635,7 +692,9 @@ namespace OktellWatch
         public bool UseHooks = true;       // мгновенное обнаружение по событиям Windows
         public int HookCooldownMs = 250;   // троттлинг обработки событий показа
         public int ListRefreshMs = 2000;   // период обновления списка инспектора
-        public int ProcCacheSec = 15;      // время жизни кэша имён процессов
+        public int ProcCacheSec = 60;      // время жизни кэша имён процессов
+                                           // (с 1.2.3.8 — 60: при 15 кэш протухал
+                                           // ровно к следующему страховочному опросу)
         public bool VisibleOnly = true;
         public List<WatchRule> Rules = new List<WatchRule>();
 
@@ -688,7 +747,7 @@ namespace OktellWatch
             UseHooks = Ini.GetBool("watch", "useHooks", true);
             HookCooldownMs = Ini.GetInt("watch", "hookCooldownMs", 250);
             ListRefreshMs = Ini.GetInt("watch", "listRefreshMs", 2000);
-            ProcCacheSec = Ini.GetInt("watch", "procCacheSec", 15);
+            ProcCacheSec = Ini.GetInt("watch", "procCacheSec", 60);
             VisibleOnly = Ini.GetBool("watch", "visibleOnly", true);
             SoundFile = Ini.Get("alert", "soundFile", @"C:\Windows\Media\Alarm05.wav");
             RepeatAlert = Ini.GetBool("alert", "repeatAlert", true);
@@ -788,7 +847,7 @@ rule1=proc:oktell;title:зарезерв;title!:дозвон;scope:any
 ; Период обновления списка окон в инспекторе, мс
 ;listRefreshMs=2000
 ; Время жизни кэша имён процессов, сек
-;procCacheSec=15
+;procCacheSec=60
 
 [alert]
 ; Звуковой файл (wav). Если файла нет — системный сигнал.
@@ -818,6 +877,9 @@ flashTaskbar=true
 enabled=true
 folder=system\logs
 
+; Журнал не копится бесконечно: файлы старше 30 дней удаляются при
+; старте, дневной файл крупнее 5 МБ переезжает в *.old.
+
 ";
     }
 
@@ -827,6 +889,9 @@ folder=system\logs
         private static readonly object Locker = new object();
         public static bool Enabled = true;
         public static string Folder = "logs";
+        private static bool _dirReady;
+        private static string _folderNow;
+        private static string _lastFile;
 
         public static void Write(string ev, string details)
         {
@@ -835,10 +900,46 @@ folder=system\logs
             {
                 lock (Locker)
                 {
-                    Directory.CreateDirectory(Folder);
+                    // папку создаём один раз, а не на каждой строке (Р5);
+                    // смена папки в настройках сбрасывает готовность
+                    if (_folderNow != Folder) { _folderNow = Folder; _dirReady = false; _lastFile = null; }
+                    if (!_dirReady) { Directory.CreateDirectory(Folder); _dirReady = true; }
                     string file = Path.Combine(Folder, "OktellWatch_" + DateTime.Now.ToString("yyyyMMdd") + ".log");
+                    if (file != _lastFile)
+                    {
+                        _lastFile = file;
+                        Retention();
+                    }
                     string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " | " + ev.PadRight(9) + "| " + details;
                     File.AppendAllText(file, line + Environment.NewLine, Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+
+        // Р5 (с 1.2.3.8): журнал больше не копится вечно. При старте и при
+        // смене суток: файлы старше 30 дней удаляются; текущий дневной файл
+        // крупнее 5 МБ переезжает в *.old (при следующей ротации заменяется)
+        private static void Retention()
+        {
+            try
+            {
+                DateTime keep = DateTime.Now.AddDays(-30);
+                string[] files = Directory.GetFiles(Folder, "OktellWatch_*.log*");
+                for (int i = 0; i < files.Length; i++)
+                {
+                    try { if (File.GetLastWriteTime(files[i]) < keep) File.Delete(files[i]); } catch { }
+                }
+                string cur = Path.Combine(Folder, "OktellWatch_" + DateTime.Now.ToString("yyyyMMdd") + ".log");
+                if (File.Exists(cur))
+                {
+                    FileInfo fi = new FileInfo(cur);
+                    if (fi.Length > 5 * 1024 * 1024)
+                    {
+                        string old = cur + ".old";
+                        try { File.Delete(old); } catch { }
+                        try { File.Move(cur, old); } catch { }
+                    }
                 }
             }
             catch { }
@@ -853,7 +954,10 @@ folder=system\logs
         // поэтому у системы спрашиваем не чаще раза в ProcCacheSec секунд на PID
         private sealed class ProcNameCache
         {
-            private class Ent { public string Name; public int Stamp; }
+            // TtlMs — на запись: неудача не должна залипать на полный срок
+            // (с 1.2.3.8, Р1): пустое имя раньше кэшировалось на ProcCacheSec
+            // секунд, и правило с proc: всё это время не работало
+            private class Ent { public string Name; public int Stamp; public int TtlMs; }
             private readonly Dictionary<int, Ent> _map = new Dictionary<int, Ent>();
             private int _ttlMs;
 
@@ -867,16 +971,40 @@ folder=system\logs
                 if (_map.TryGetValue(pid, out e))
                 {
                     int age = unchecked(Environment.TickCount - e.Stamp);
-                    if (age >= 0 && age < _ttlMs) return e.Name;
+                    if (age >= 0 && age < e.TtlMs) return e.Name;
                 }
-                string n = "";
-                try { using (Process p = Process.GetProcessById(pid)) { n = p.ProcessName; } }
-                catch { }
+                string n = NameByHandle(pid);
+                bool failed = (n == null);
+                if (failed)
+                {
+                    // защищённый процесс или уже закрыт — прежний путь
+                    try { using (Process p = Process.GetProcessById(pid)) { n = p.ProcessName; } }
+                    catch { }
+                }
                 Ent ne = new Ent();
-                ne.Name = n;
+                ne.Name = n ?? "";
                 ne.Stamp = Environment.TickCount;
+                ne.TtlMs = failed ? Math.Min(2000, _ttlMs) : _ttlMs;
                 _map[pid] = ne;
-                return n;
+                return ne.Name;
+            }
+
+            // Имя процесса дешёвым способом: десятки микросекунд вместо двух
+            // системных переборов всех процессов. null — не удалось
+            private static string NameByHandle(int pid)
+            {
+                if (pid <= 0) return null;
+                IntPtr h = WinApi.OpenProcess(WinApi.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (h == IntPtr.Zero) return null;
+                try
+                {
+                    StringBuilder sb = new StringBuilder(1024);
+                    int size = sb.Capacity;
+                    if (!WinApi.QueryFullProcessImageName(h, 0, sb, ref size)) return null;
+                    return Path.GetFileNameWithoutExtension(sb.ToString(0, size));
+                }
+                catch { return null; }
+                finally { WinApi.CloseHandle(h); }
             }
         }
 
@@ -944,8 +1072,11 @@ folder=system\logs
             return ReadWindow(h, isChild, false);
         }
 
-        // Журнал «IGNORED»: окна, пропущенные исключением (одна запись
-        // на hwnd за всё время работы — чтобы не засорять журнал).
+        // Журнал «IGNORED»: одна запись на ПАРУ «hwnd + правило» (с 1.2.3.8).
+        // Раньше ключом был только hwnd: после переиспользования hwnd новым
+        // окном событие уже не записывалось, а набор рос неограниченно.
+        // Теперь записи чистятся при закрытии трека (ForgetIgnored) и при
+        // смене правил (ResetIgnored). Младшие 32 бита — значащие биты hwnd.
         private static readonly HashSet<long> _ignoredLogged = new HashSet<long>();
 
         // Скан дерева корня: заголовок/класс корня + тексты/классы дочерних
@@ -963,26 +1094,75 @@ folder=system\logs
             return rs;
         }
 
-        // Скан дерева для окна верхнего уровня (дочерние перечисляются на месте)
-        private static RootScan ScanRootTop(WindowInfo top)
+        // Дочерние окна корня — один обход дерева на скан (с 1.2.3.8, Р3):
+        // раньше дерево перечитывалось заново для каждого правила и для
+        // проверки исключений — до 2N обходов одного и того же окна за скан.
+        // Список собирается лениво и живёт до конца текущего скана.
+        private static List<WindowInfo> ChildrenOf(WindowInfo top,
+            Dictionary<long, List<WindowInfo>> cache)
         {
-            List<WindowInfo> children = new List<WindowInfo>();
+            long k = top.Hwnd.ToInt64();
+            List<WindowInfo> res;
+            if (cache.TryGetValue(k, out res)) return res;
+            res = new List<WindowInfo>();
             WinApi.EnumChildWindows(top.Hwnd, delegate(IntPtr ch, IntPtr lp)
             {
                 WindowInfo ci = ReadWindow(ch, true);
-                if (ci != null) children.Add(ci);
+                if (ci != null) { ci.RootHwnd = top.Hwnd; res.Add(ci); }
                 return true;
             }, IntPtr.Zero);
-            return ScanRoot(top, children);
+            cache[k] = res;
+            return res;
+        }
+
+        // Скан дерева для окна верхнего уровня; дочерние — из кэша скана
+        private static RootScan ScanRootTop(WindowInfo top,
+            Dictionary<long, List<WindowInfo>> childCache,
+            Dictionary<long, RootScan> rootCache)
+        {
+            long k = top.Hwnd.ToInt64();
+            RootScan rs;
+            if (rootCache.TryGetValue(k, out rs)) return rs;
+            rs = ScanRoot(top, ChildrenOf(top, childCache));
+            rootCache[k] = rs;
+            return rs;
+        }
+
+        // Сбросить журнал IGNORED (при смене правил): нумерация правил
+        // смещается, прежние «уже записано» больше не действуют
+        public static void ResetIgnored()
+        {
+            _ignoredLogged.Clear();
         }
 
         // Записать в журнал, что окно пропущено исключением правила
         private static void NoteIgnored(WatchRule r, WindowInfo wi, int ruleNo)
         {
-            if (_ignoredLogged.Add(wi.Hwnd.ToInt64()))
+            long k = (((long)ruleNo) << 32) | (wi.Hwnd.ToInt64() & 0xFFFFFFFFL);
+            if (_ignoredLogged.Add(k))
                 Log.Write("IGNORED", "[правило " + (ruleNo + 1) + "] " +
                           (wi.IsChild ? "[внутр. окно] " : "") + wi.Describe() +
                           " — исключение по дереву окна: " + r.Raw);
+        }
+
+        // При закрытии трека забыть его записи IGNORED (Р5): если hwnd
+        // переиспользуется новым окном, пропуск исключением снова попадёт
+        // в журнал
+        public static void ForgetIgnored(long hwnd)
+        {
+            if (_ignoredLogged.Count == 0) return;
+            long low = hwnd & 0xFFFFFFFFL;
+            List<long> kill = null;
+            foreach (long k in _ignoredLogged)
+            {
+                if ((k & 0xFFFFFFFFL) == low)
+                {
+                    if (kill == null) kill = new List<long>();
+                    kill.Add(k);
+                }
+            }
+            if (kill != null)
+                for (int i = 0; i < kill.Count; i++) _ignoredLogged.Remove(kill[i]);
         }
 
         // Собрать все окна, совпадающие с правилами, в found (ключ = hwnd);
@@ -1003,6 +1183,11 @@ folder=system\logs
                 return true;
             }, IntPtr.Zero);
 
+            // кэши одного скана (с 1.2.3.8, Р3): дерево каждого корня и его
+            // RootScan собираются один раз и переиспользуются всеми правилами
+            Dictionary<long, List<WindowInfo>> childCache = new Dictionary<long, List<WindowInfo>>();
+            Dictionary<long, RootScan> rootCache = new Dictionary<long, RootScan>();
+
             for (int ri = 0; ri < s.Rules.Count; ri++)
             {
                 WatchRule r = s.Rules[ri];
@@ -1022,7 +1207,7 @@ folder=system\logs
                         {
                             if (rootScan)
                             {
-                                RootScan rs = ScanRootTop(wi);
+                                RootScan rs = ScanRootTop(wi, childCache, rootCache);
                                 if (rs.Rejects(r)) { NoteIgnored(r, wi, ri); continue; }
                             }
                             long k = wi.Hwnd.ToInt64();
@@ -1043,16 +1228,10 @@ folder=system\logs
                         // оптимизация: если у правила указан proc и он не совпадает
                         // с процессом верхнего окна — дочерние можно не смотреть
                         if (!Str.IsEmpty(r.Proc) && !Str.ContainsIC(top.ProcessName, r.Proc)) continue;
-                        // сначала собираем дочерние окна: список нужен и для
-                        // скана исключений по всему дереву (с 1.2.3.3)
-                        List<WindowInfo> children = new List<WindowInfo>();
-                        WinApi.EnumChildWindows(top.Hwnd, delegate(IntPtr ch, IntPtr lp)
-                        {
-                            WindowInfo ci = ReadWindow(ch, true);
-                            if (ci != null) { ci.RootHwnd = top.Hwnd; children.Add(ci); }
-                            return true;
-                        }, IntPtr.Zero);
-                        RootScan rs = rootScan ? ScanRoot(top, children) : null;
+                        // дочерние окна — из кэша скана: дерево обходится
+                        // один раз для всех правил (с 1.2.3.8, Р3)
+                        List<WindowInfo> children = ChildrenOf(top, childCache);
+                        RootScan rs = rootScan ? ScanRootTop(top, childCache, rootCache) : null;
                         for (int cj = 0; cj < children.Count; cj++)
                         {
                             WindowInfo ci = children[cj];
@@ -1721,6 +1900,8 @@ folder=system\logs
 CLOSED (форма обработана/закрыта), SOUND (звук остановлен), CONFIG
 (изменения настроек), IGNORED (окно пропущено исключением правила),
 PAUSE / RESUME, ERROR.
+Файлы журнала не копятся бесконечно: старше 30 дней удаляются при
+старте, дневной файл крупнее 5 МБ переезжает в *.old.
 
 АВТОЗАПУСК
 Меню значка в трее -> «Автозапуск с Windows» (прописывается в реестр
@@ -2312,6 +2493,23 @@ config.ini можно править в Блокноте прямо во вре�
         private int _lastCfgTick = int.MinValue;   // троттлинг проверки конфига в hook-пути
         private int _hookCooldownMs = 250;
         private Timer _tailTimer;                  // «хвост» троттлинга скана (с 1.2.3.6)
+
+        // Р2 (с 1.2.3.8): фильтр событий показа по процессу ДО скана.
+        // Хук системный — события приходят от всех окон всех процессов
+        // (тултипы, меню, браузеры), и раньше каждое могло запустить полный
+        // обход окон (до 4 раз в секунду при активной работе мышью).
+        // Чужое событие теперь стоит один дешёвый GetWindowThreadProcessId
+        // + проверку HashSet. Появление нового процесса (перезапуск Oktell)
+        // подхватывается сразу: на первый показ запрашивается имя (дешёвый
+        // путь Р1) и сравнивается с proc:-ключами включённых правил.
+        // Если у какого-то включённого правила нет proc: — фильтр
+        // отключается целиком (нужны события всех процессов).
+        private sealed class PidVerdict { public bool Target; public int Stamp; }
+        private bool _pidFilterAll = true;   // до первой сборки фильтр выключен
+        private readonly List<string> _targetProcKeys = new List<string>();
+        private readonly HashSet<int> _targetPids = new HashSet<int>();
+        private readonly Dictionary<int, PidVerdict> _pidVerdicts = new Dictionary<int, PidVerdict>();
+        private int _pidTtlMs = 60000;
         private int[] _matchCounts = new int[0];
 
         // -------------------------------------- portable-компоновка (system\)
@@ -2394,6 +2592,52 @@ config.ini можно править в Блокноте прямо во вре�
         private static int Clamp(int v, int min, int max) { return v < min ? min : (v > max ? max : v); }
 
         // ------------------------------------------- мгновенное обнаружение (v1.1)
+        // Пересобрать PID-фильтр (старт и каждое применение настроек):
+        // proc:-ключи включённых правил; правило без proc: выключает
+        // фильтр целиком. Заодно сбрасывается журнал IGNORED — нумерация
+        // правил могла сместиться.
+        private void RebuildPidFilter()
+        {
+            _targetPids.Clear();
+            _pidVerdicts.Clear();
+            _targetProcKeys.Clear();
+            _pidFilterAll = false;
+            _pidTtlMs = Math.Max(1, _settings.ProcCacheSec) * 1000;
+            for (int i = 0; i < _settings.Rules.Count; i++)
+            {
+                WatchRule r = _settings.Rules[i];
+                if (r == null || !r.Enabled) continue;
+                if (Str.IsEmpty(r.Proc)) { _pidFilterAll = true; break; }
+                string key = r.Proc.Trim().ToLowerInvariant();
+                if (key.Length > 0 && !_targetProcKeys.Contains(key)) _targetProcKeys.Add(key);
+            }
+            Collector.ResetIgnored();
+        }
+
+        private bool IsTargetPid(int pid)
+        {
+            if (_pidFilterAll) return true;
+            if (pid <= 0) return false;
+            if (_targetPids.Contains(pid)) return true;
+            int now = Environment.TickCount;
+            PidVerdict v;
+            if (_pidVerdicts.TryGetValue(pid, out v))
+            {
+                int age = unchecked(now - v.Stamp);
+                if (age >= 0 && age < _pidTtlMs) return v.Target;
+            }
+            string nl = (Collector.ProcessName(pid) ?? "").ToLowerInvariant();
+            bool target = false;
+            for (int i = 0; i < _targetProcKeys.Count; i++)
+                if (nl.Contains(_targetProcKeys[i])) { target = true; break; }
+            if (target) _targetPids.Add(pid);
+            PidVerdict nv = new PidVerdict();
+            nv.Target = target;
+            nv.Stamp = now;
+            _pidVerdicts[pid] = nv;
+            return target;
+        }
+
         private void InstallHook()
         {
             if (!_settings.UseHooks || _hook != IntPtr.Zero) return;
@@ -2466,6 +2710,17 @@ config.ini можно править в Блокноте прямо во вре�
                 }
             }
 
+            // Р2 (с 1.2.3.8): чужие процессы отсекаются ДО скана — тултипы,
+            // меню и окна браузеров больше не запускают обход окон. DESTROY
+            // наблюдаемых окон обработан выше и до этой точки не доходит;
+            // страховочный полный опрос фильтра не минует.
+            if (!_pidFilterAll)
+            {
+                uint evPid;
+                WinApi.GetWindowThreadProcessId(hwnd, out evPid);
+                if (!IsTargetPid((int)evPid)) return;
+            }
+
             // троттлинг скана. int.MinValue здесь — «скана ещё не было»:
             // раньше разность с ним переполнялась в минус, и все события
             // показа до первого страховочного опроса (15 с) проглатывались.
@@ -2511,6 +2766,7 @@ config.ini можно править в Блокноте прямо во вре�
             _hookCooldownMs = Clamp(_settings.HookCooldownMs, 50, 5000);
             UpdateTimerInterval();
             Collector.SetCacheTtl(_settings.ProcCacheSec);
+            RebuildPidFilter();   // Р2: состав proc:-ключей мог измениться
         }
 
         // Интервал таймера опроса (с 1.2.3.6). Пока есть наблюдаемые окна
@@ -2765,6 +3021,7 @@ config.ini можно править в Блокноте прямо во вре�
             Track t;
             if (!_tracked.TryGetValue(hwnd, out t)) return;
             _tracked.Remove(hwnd);
+            Collector.ForgetIgnored(hwnd);   // Р5: hwnd может переиспользоваться
             Log.Write("CLOSED", reason + "; сигналов: " + t.Alerts +
                                 "; держалось: " + (int)(DateTime.Now - t.FirstSeen).TotalSeconds + " сек; " +
                                 t.Info.Describe());
@@ -2945,32 +3202,40 @@ config.ini можно править в Блокноте прямо во вре�
                 List<string> oldKeys = new List<string>();
                 for (int i = 0; i < items.Count; i++)
                     if (items[i].Key.ToLowerInvariant().StartsWith("rule")) oldKeys.Add(items[i].Key);
-                for (int i = 0; i < oldKeys.Count; i++) _settings.Ini.DeleteKey("watch", oldKeys[i]);
-
+                // Р5 (с 1.2.3.8): одна запись файла на всю серию изменений —
+                // раньше каждый DeleteKey/SetValue переписывал config.ini,
+                // и между записями файл существовал без правил
                 int n = 0;
-                for (int i = 0; i < rules.Count; i++)
-                {
-                    WatchRule r = rules[i];
-                    if (r == null) continue;
-                    string raw = r.ToRaw();
-                    if (String.IsNullOrEmpty(raw)) continue;
-                    n++;
-                    _settings.Ini.SetValue("watch", "rule" + n, raw);
-                }
-                // С 1.2.3.7: строки, которые не удалось разобрать при загрузке,
-                // больше не стираются при сохранении — пишутся обратно как есть
-                // (пересобрать их из полей нельзя: значения программе неизвестны)
                 int savedBad = 0;
-                for (int i = 0; i < _settings.BadRules.Count; i++)
+                _settings.Ini.BeginUpdate();
+                try
                 {
-                    string line = _settings.BadRules[i];
-                    int eq = line.IndexOf('=');
-                    string val = (eq >= 0 ? line.Substring(eq + 1) : line).Trim();
-                    if (val.Length == 0) continue;
-                    n++;
-                    _settings.Ini.SetValue("watch", "rule" + n, val);
-                    savedBad++;
+                    for (int i = 0; i < oldKeys.Count; i++) _settings.Ini.DeleteKey("watch", oldKeys[i]);
+
+                    for (int i = 0; i < rules.Count; i++)
+                    {
+                        WatchRule r = rules[i];
+                        if (r == null) continue;
+                        string raw = r.ToRaw();
+                        if (String.IsNullOrEmpty(raw)) continue;
+                        n++;
+                        _settings.Ini.SetValue("watch", "rule" + n, raw);
+                    }
+                    // С 1.2.3.7: строки, которые не удалось разобрать при загрузке,
+                    // больше не стираются при сохранении — пишутся обратно как есть
+                    // (пересобрать их из полей нельзя: значения программе неизвестны)
+                    for (int i = 0; i < _settings.BadRules.Count; i++)
+                    {
+                        string line = _settings.BadRules[i];
+                        int eq = line.IndexOf('=');
+                        string val = (eq >= 0 ? line.Substring(eq + 1) : line).Trim();
+                        if (val.Length == 0) continue;
+                        n++;
+                        _settings.Ini.SetValue("watch", "rule" + n, val);
+                        savedBad++;
+                    }
                 }
+                finally { _settings.Ini.EndUpdate(); }
                 _settings.Ini.Reload();
                 _settings.ReadAll();
                 ApplyLogSettings();
