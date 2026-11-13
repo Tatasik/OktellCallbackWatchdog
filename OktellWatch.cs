@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.2")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.2")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.2")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.3")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.3")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.3")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -233,7 +233,12 @@ namespace OktellWatch
     // Совпадение = ВСЕ указанные поля найдены в окне (без учёта регистра).
     // Исключения (с 1.2): proc!:...;title!:...;class!:... — поле НЕ должно
     // найтись в окне. Работают вместе с обычными признаками: правило
-    // срабатывает, только если ни одно исключение не найдено.
+    // срабатывает, только если ни одно исключение не найдено. С 1.2.3.3
+    // title!: и class!: проверяются по ВСЕМУ дереву корневого окна —
+    // заголовок корня и все его видимые внутренние элементы (раньше
+    // исключение смотрело только в совпавший элемент, поэтому фраза из
+    // другого элемента той же формы — например, строка «Идёт дозвон…» —
+    // исключение не включала).
     // Параметр btn: из конфигов до 1.2.3.2 игнорируется (проверка кнопок
     // снята с поддержки: наблюдение работает по текстовым приметам окна).
     internal class WatchRule
@@ -242,8 +247,8 @@ namespace OktellWatch
         public string Title;
         public string Class;
         public string NotProc;    // proc!:  — процесс НЕ должен содержать
-        public string NotTitle;   // title!: — заголовок НЕ должен содержать
-        public string NotClass;   // class!: — класс НЕ должен содержать
+        public string NotTitle;   // title!: — фраза НЕ должна найтись нигде в окне
+        public string NotClass;   // class!: — класс НЕ должен найтись нигде в окне
         public string Scope = "top";
         public string Raw = "";
         public bool Enabled = true;   // false = правило отключено (off=true)
@@ -351,13 +356,46 @@ namespace OktellWatch
             if (!Str.IsEmpty(Title)) p.Add("заголовок ~«" + Title.Trim() + "»");
             if (!Str.IsEmpty(Class)) p.Add("класс ~«" + Class.Trim() + "»");
             if (!Str.IsEmpty(NotProc)) p.Add("процесс НЕ ~«" + NotProc.Trim() + "»");
-            if (!Str.IsEmpty(NotTitle)) p.Add("заголовок НЕ ~«" + NotTitle.Trim() + "»");
-            if (!Str.IsEmpty(NotClass)) p.Add("класс НЕ ~«" + NotClass.Trim() + "»");
+            if (!Str.IsEmpty(NotTitle)) p.Add("в окне НЕТ ~«" + NotTitle.Trim() + "»");
+            if (!Str.IsEmpty(NotClass)) p.Add("класса НЕТ в окне ~«" + NotClass.Trim() + "»");
             string sc = Str.Lo(Scope);
             if (sc == "child") p.Add("только вложенные окна");
             else if (sc == "any") p.Add("главные и вложенные окна");
             else p.Add("только главные окна");
             return String.Join("; ", p.ToArray());
+        }
+    }
+
+    // ------------------------------------------------------------------ RootScan
+    // Скан текстов и классов всего дерева корневого окна (с 1.2.3.3):
+    // заголовок/класс корня + тексты/классы всех видимых дочерних окон.
+    // Нужен для исключений title!: / class!: — фраза не должна найтись
+    // НИГДЕ в окне, а не только в совпавшем элементе.
+    internal sealed class RootScan
+    {
+        public readonly List<string> Texts = new List<string>();
+        public readonly List<string> Classes = new List<string>();
+
+        public bool HasText(string s)
+        {
+            for (int i = 0; i < Texts.Count; i++)
+                if (Str.ContainsIC(Texts[i], s)) return true;
+            return false;
+        }
+
+        public bool HasClass(string s)
+        {
+            for (int i = 0; i < Classes.Count; i++)
+                if (Str.ContainsIC(Classes[i], s)) return true;
+            return false;
+        }
+
+        // true = по дереву окна найдено исключение правила
+        public bool Rejects(WatchRule r)
+        {
+            if (!Str.IsEmpty(r.NotTitle) && HasText(r.NotTitle)) return true;
+            if (!Str.IsEmpty(r.NotClass) && HasClass(r.NotClass)) return true;
+            return false;
         }
     }
 
@@ -653,12 +691,13 @@ visibleOnly=true
 ;           child — внутренние окна (элементы внутри главного окна)
 ;           any   — искать и там, и там
 ;   proc!:  процесс НЕ должен содержать (исключение)
-;   title!: заголовок НЕ должен содержать (исключение)
-;   class!: класс НЕ должен содержать (исключение)
+;   title!: фраза НЕ должна найтись нигде в окне — в заголовке и во
+;           внутренних элементах (с 1.2.3.3)
+;   class!: класс НЕ должен найтись нигде в окне (с 1.2.3.3)
 ; Регистр не важен. Совпадение = ВСЕ указанные поля найдены в окне.
 ; Исключения (поля со знаком «!») сужают правило: окно подходит, только
-; если исключающая подстрока НЕ найдена в окне. Хотя бы один обычный
-; признак (без «!») в правиле обязателен.
+; если исключающая подстрока НЕ найдена нигде в окне. Хотя бы один
+; обычный признак (без «!») в правиле обязателен.
 ; Несколько правил работают как «ИЛИ». Лишнее поле просто не указывайте.
 ; Выключенное правило помечается off:true (это делает Диспетчер правил).
 ; Добавлять и убирать правила удобнее через «Диспетчер правил...» в меню
@@ -667,8 +706,10 @@ visibleOnly=true
 ; Основное правило: процесс Oktell, внутри формы есть элемент с текстом
 ; «зарезерв» (строка «Вы зарезервированы на выполнение задачи» — она есть
 ; во всех задачах обратного звонка; scope:any ищет её и среди внутренних
-; элементов формы).
-rule1=proc:oktell;title:зарезерв;scope:any
+; элементов формы). Окно дозвона игнорируется: пока внизу формы видно
+; «Идёт дозвон на номер…» (после подтверждения звонка), исключение
+; title!:дозвон глушит сигнал; в момент резерва этой фразы в окне нет.
+rule1=proc:oktell;title:зарезерв;title!:дозвон;scope:any
 
 ; Примеры (включите галочкой в Диспетчере правил или раскомментируйте):
 ;rule2=proc:oktell;title:перезвон;scope:top
@@ -677,9 +718,9 @@ rule1=proc:oktell;title:зарезерв;scope:any
 ;rule5=proc:oktell;title:обратн;scope:child
 
 ; Исключение дозвона: ловим «обратн», но НЕ окна дозвона, которые
-; появляются после подтверждения звонка (точное слово подскажет
-; заголовок окна — см. «Окно под курсором» в справке):
-;rule7=proc:oktell;title:обратн;title!:дозвон;scope:top
+; появляются после подтверждения звонка (тот же приём, что в rule1;
+; точную фразу подскажет инспектор «Окно под курсором» в справке):
+;rule7=proc:oktell;title:обратн;title!:дозвон;scope:any
 
 ; --- Тонкая настройка (обычно менять не нужно) ---
 ; Реагировать на события показа окон не чаще, чем раз в N мс
@@ -841,8 +882,53 @@ folder=system\logs
             return ReadWindow(h, isChild, false);
         }
 
+        // Журнал «IGNORED»: окна, пропущенные исключением (одна запись
+        // на hwnd за всё время работы — чтобы не засорять журнал).
+        private static readonly HashSet<long> _ignoredLogged = new HashSet<long>();
+
+        // Скан дерева корня: заголовок/класс корня + тексты/классы дочерних
+        private static RootScan ScanRoot(WindowInfo top, List<WindowInfo> children)
+        {
+            RootScan rs = new RootScan();
+            if (!Str.IsEmpty(top.Title)) rs.Texts.Add(top.Title);
+            if (!Str.IsEmpty(top.ClassName)) rs.Classes.Add(top.ClassName);
+            if (children != null)
+                for (int i = 0; i < children.Count; i++)
+                {
+                    if (!Str.IsEmpty(children[i].Title)) rs.Texts.Add(children[i].Title);
+                    if (!Str.IsEmpty(children[i].ClassName)) rs.Classes.Add(children[i].ClassName);
+                }
+            return rs;
+        }
+
+        // Скан дерева для окна верхнего уровня (дочерние перечисляются на месте)
+        private static RootScan ScanRootTop(WindowInfo top)
+        {
+            List<WindowInfo> children = new List<WindowInfo>();
+            WinApi.EnumChildWindows(top.Hwnd, delegate(IntPtr ch, IntPtr lp)
+            {
+                WindowInfo ci = ReadWindow(ch, true);
+                if (ci != null) children.Add(ci);
+                return true;
+            }, IntPtr.Zero);
+            return ScanRoot(top, children);
+        }
+
+        // Записать в журнал, что окно пропущено исключением правила
+        private static void NoteIgnored(WatchRule r, WindowInfo wi, int ruleNo)
+        {
+            if (_ignoredLogged.Add(wi.Hwnd.ToInt64()))
+                Log.Write("IGNORED", "[правило " + (ruleNo + 1) + "] " +
+                          (wi.IsChild ? "[внутр. окно] " : "") + wi.Describe() +
+                          " — исключение по дереву окна: " + r.Raw);
+        }
+
         // Собрать все окна, совпадающие с правилами, в found (ключ = hwnd);
-        // ruleOf — каким по счёту правилом найдено окно (для диспетчера правил)
+        // ruleOf — каким по счёту правилом найдено окно (для диспетчера правил).
+        // С 1.2.3.3 исключения title!:/class!: проверяются по всему дереву
+        // корневого окна: фраза не должна найтись нигде в окне, а не только
+        // в совпавшем элементе (окно дозвона ловится иначе, чем фраза
+        // «зарезерв» — они живут в разных элементах одной формы).
         public static void Collect(Settings s, Dictionary<long, WindowInfo> found,
             Dictionary<long, int> ruleOf)
         {
@@ -862,6 +948,8 @@ folder=system\logs
                 string sc = Str.Lo(r.Scope);
                 bool needTop = (sc == "top" || sc == "any");
                 bool needChild = (sc == "child" || sc == "any");
+                // проверять исключения по всему дереву окна (с 1.2.3.3)
+                bool rootScan = !Str.IsEmpty(r.NotTitle) || !Str.IsEmpty(r.NotClass);
 
                 if (needTop)
                 {
@@ -870,6 +958,11 @@ folder=system\logs
                         WindowInfo wi = tops[i];
                         if (r.Matches(wi))
                         {
+                            if (rootScan)
+                            {
+                                RootScan rs = ScanRootTop(wi);
+                                if (rs.Rejects(r)) { NoteIgnored(r, wi, ri); continue; }
+                            }
                             long k = wi.Hwnd.ToInt64();
                             if (!found.ContainsKey(k))
                             {
@@ -888,24 +981,28 @@ folder=system\logs
                         // оптимизация: если у правила указан proc и он не совпадает
                         // с процессом верхнего окна — дочерние можно не смотреть
                         if (!Str.IsEmpty(r.Proc) && !Str.ContainsIC(top.ProcessName, r.Proc)) continue;
+                        // сначала собираем дочерние окна: список нужен и для
+                        // скана исключений по всему дереву (с 1.2.3.3)
+                        List<WindowInfo> children = new List<WindowInfo>();
                         WinApi.EnumChildWindows(top.Hwnd, delegate(IntPtr ch, IntPtr lp)
                         {
                             WindowInfo ci = ReadWindow(ch, true);
-                            if (ci != null)
-                            {
-                                ci.RootHwnd = top.Hwnd;
-                                if (r.Matches(ci))
-                                {
-                                    long k = ch.ToInt64();
-                                    if (!found.ContainsKey(k))
-                                    {
-                                        found[k] = ci;
-                                        if (ruleOf != null) ruleOf[k] = ri;
-                                    }
-                                }
-                            }
+                            if (ci != null) { ci.RootHwnd = top.Hwnd; children.Add(ci); }
                             return true;
                         }, IntPtr.Zero);
+                        RootScan rs = rootScan ? ScanRoot(top, children) : null;
+                        for (int cj = 0; cj < children.Count; cj++)
+                        {
+                            WindowInfo ci = children[cj];
+                            if (!r.Matches(ci)) continue;
+                            if (rs != null && rs.Rejects(r)) { NoteIgnored(r, ci, ri); continue; }
+                            long k = ci.Hwnd.ToInt64();
+                            if (!found.ContainsKey(k))
+                            {
+                                found[k] = ci;
+                                if (ruleOf != null) ruleOf[k] = ri;
+                            }
+                        }
                     }
                 }
             }
@@ -1515,11 +1612,12 @@ folder=system\logs
            child — внутренние окна (элементы внутри главного окна)
            any   — искать и там, и там
    proc!:  процесс НЕ должен содержать (исключение, с 1.2)
-   title!: заголовок НЕ должен содержать (исключение, с 1.2)
-   class!: класс НЕ должен содержать (исключение, с 1.2)
+   title!: фраза НЕ должна найтись нигде в окне (исключение, с 1.2)
+   class!: класс НЕ должен найтись нигде в окне (исключение, с 1.2)
 • Регистр не важен; совпадение = ВСЕ указанные поля найдены в окне.
 • Исключения (со знаком «!») сужают правило: окно подходит, только
-  если исключающая подстрока НЕ найдена. Например, ловим «обратн»,
+  если исключающая подстрока НЕ найдена нигде в окне — в заголовке
+  и во внутренних элементах (с 1.2.3.3). Например, ловим «обратн»,
   но не окна дозвона после подтверждения:
    rule1=proc:oktell;title:обратн;title!:дозвон;scope:top
   Хотя бы один обычный признак (без «!») обязателен.
