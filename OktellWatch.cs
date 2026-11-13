@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.4")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.4")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.4")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.5")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.5")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.5")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -742,8 +742,10 @@ repeatEverySec=5
 
 ; Звук обрывается мгновенно, как только закрыта последняя наблюдаемая
 ; форма (не доигрывает до конца файла — чтобы сигнал не попал в эфир,
-; когда оператор уже говорит с клиентом). Пауза наблюдения глушит
-; звук тоже; отдельно это поведение не настраивается.
+; когда оператор уже говорит с клиентом). Закрытие всей формы гасит
+; звук и тогда, когда отслеживался её внутренний элемент (с 1.2.3.5).
+; Пауза наблюдения глушит звук тоже; отдельно это поведение не
+; настраивается.
 
 ; Выводить окно Oktell наверх при первом обнаружении формы
 bringToFront=true
@@ -1368,10 +1370,7 @@ folder=system\logs
                 for (int i = 0; i < ws.Count; i++)
                 {
                     WindowInfo wi = ws[i];
-                    if (f.Length > 0 &&
-                        !Str.Lo(wi.Title).Contains(f) &&
-                        !Str.Lo(wi.ClassName).Contains(f) &&
-                        !Str.Lo(wi.ProcessName).Contains(f)) continue;
+                    if (!FilterMatch(wi, f)) continue;
                     sig.Append(wi.Hwnd.ToInt64().ToString("X")).Append('\u0001')
                        .Append(wi.ClassName).Append('\u0001')
                        .Append(wi.Title).Append('\u0001')
@@ -1399,10 +1398,7 @@ folder=system\logs
                 for (int i = 0; i < ws.Count; i++)
                 {
                     WindowInfo wi = ws[i];
-                    if (f.Length > 0 &&
-                        !Str.Lo(wi.Title).Contains(f) &&
-                        !Str.Lo(wi.ClassName).Contains(f) &&
-                        !Str.Lo(wi.ProcessName).Contains(f)) continue;
+                    if (!FilterMatch(wi, f)) continue;
 
                     ListViewItem it;
                     if (!old.TryGetValue(wi.Hwnd.ToInt64(), out it))
@@ -1433,6 +1429,17 @@ folder=system\logs
                 _status.Text = StatusText(ws.Count);
             }
             catch { }
+        }
+
+        // Фильтр инспектора: подстрока в заголовке, классе, процессе или
+        // в hwnd (шестнадцатеричный вид, как в столбце «hwnd»)
+        private static bool FilterMatch(WindowInfo wi, string f)
+        {
+            if (f.Length == 0) return true;
+            if (Str.Lo(wi.Title).Contains(f)) return true;
+            if (Str.Lo(wi.ClassName).Contains(f)) return true;
+            if (Str.Lo(wi.ProcessName).Contains(f)) return true;
+            return wi.Hwnd.ToInt64().ToString("X").ToLowerInvariant().Contains(f);
         }
 
         private string StatusText(int total)
@@ -1636,7 +1643,9 @@ folder=system\logs
 Обрыв        — закрыли последнюю наблюдаемую форму — звук гаснет
                мгновенно и не доигрывает до конца файла (чтобы сигнал
                не попал в эфир, когда оператор уже говорит с клиентом).
-               Пауза наблюдения глушит звук тоже.
+               Закрытие всей формы гасит звук и тогда, когда отслеживался
+               её внутренний элемент (с 1.2.3.5). Пауза наблюдения глушит
+               звук тоже.
 Окно наверх  — при первом обнаружении (галочка «Поднимать окно наверх»
                в меню трея, либо bringToFront=false в config.ini).
 Мигание      — кнопка окна мигает на панели задач до его активации.
@@ -1646,8 +1655,8 @@ folder=system\logs
 (папку можно поменять: [log] folder= в config.ini).
 События: START, DETECTED (форма найдена), ALERT / RE-ALERT (сигналы),
 CLOSED (форма обработана/закрыта), SOUND (звук остановлен), CONFIG
-(изменения настроек), PAUSE / RESUME,
-ERROR.
+(изменения настроек), IGNORED (окно пропущено исключением правила),
+PAUSE / RESUME, ERROR.
 
 АВТОЗАПУСК
 Меню значка в трее -> «Автозапуск с Windows» (прописывается в реестр
@@ -2233,6 +2242,7 @@ config.ini можно править в Блокноте прямо во вре�
         private IntPtr _hook = IntPtr.Zero;
         private WinApi.WinEventDelegate _hookProc;
         private int _lastScanTick = int.MinValue;
+        private int _lastCfgTick = int.MinValue;   // троттлинг проверки конфига в hook-пути
         private int _hookCooldownMs = 250;
         private int[] _matchCounts = new int[0];
 
@@ -2340,20 +2350,58 @@ config.ini можно править в Блокноте прямо во вре�
         private void OnWinEvent(IntPtr hHook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return; // интересуют окна (OBJID_WINDOW)
+
+            // config.ini могли править, пока программа ждала событий: штамп
+            // файла проверяем на каждом событии окон (не дожидаясь
+            // страховочного опроса), но не чаще раза в hookCooldownMs —
+            // тогда «перечитает в течение секунды» верно и при простое.
+            int now = Environment.TickCount;
+            if (_lastCfgTick == int.MinValue ||
+                unchecked(now - _lastCfgTick) >= _hookCooldownMs)
+            {
+                _lastCfgTick = now;
+                try { CheckIniChanged(); } catch { }
+            }
+
             if (_paused || _captureHold) return;
 
             // Наблюдаемое окно уничтожено — закрываем трек и глушим звук
             // немедленно, без троттлинга и не дожидаясь ближайшего опроса:
             // звук не должен доигрывать, пока оператор уже говорит с клиентом.
-            if (evt == WinApi.EVENT_OBJECT_DESTROY && _tracked.ContainsKey(hwnd.ToInt64()))
+            // Если уничтожено КОРНЕВОЕ окно, закрываются и треки его внутренних
+            // элементов (с 1.2.3.5): правило scope:any держит внутренний элемент
+            // формы Oktell, и раньше закрытие всей формы гасило звук только
+            // по ближайшему страховочному опросу — до 15 секунд спустя.
+            if (evt == WinApi.EVENT_OBJECT_DESTROY)
             {
-                try { CloseTrack(hwnd.ToInt64(), "окно закрыто"); }
-                catch (Exception ex) { Log.Write("ERROR", "CloseTrack(hook): " + ex.Message); }
-                return;
+                long key = hwnd.ToInt64();
+                List<long> dead = null;
+                foreach (KeyValuePair<long, Track> kv in _tracked)
+                {
+                    if (kv.Key == key || kv.Value.Info.RootHwnd == hwnd)
+                    {
+                        if (dead == null) dead = new List<long>();
+                        dead.Add(kv.Key);
+                    }
+                }
+                if (dead != null)
+                {
+                    for (int i = 0; i < dead.Count; i++)
+                    {
+                        try { CloseTrack(dead[i], "окно закрыто"); }
+                        catch (Exception ex) { Log.Write("ERROR", "CloseTrack(hook): " + ex.Message); }
+                    }
+                    return;
+                }
             }
 
-            int now = Environment.TickCount;
-            if (unchecked(now - _lastScanTick) < _hookCooldownMs) return;    // троттлинг
+            // троттлинг скана. int.MinValue здесь — «скана ещё не было»:
+            // раньше разность с ним переполнялась в минус, и все события
+            // показа до первого страховочного опроса (15 с) проглатывались.
+            now = Environment.TickCount;
+            if (_lastScanTick != int.MinValue &&
+                unchecked(now - _lastScanTick) < _hookCooldownMs) return;
+            _lastScanTick = now;
             try { Scan(); }
             catch (Exception ex) { Log.Write("ERROR", "Scan(hook): " + ex.Message); }
         }
