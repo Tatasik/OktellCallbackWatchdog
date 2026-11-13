@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.5")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.5")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.5")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.6")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.6")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.6")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -206,6 +206,18 @@ namespace OktellWatch
             s = s.Trim();
             return s.Length <= n ? s : s.Substring(0, Math.Max(1, n - 3)) + "...";
         }
+
+        // Строка без многоточия — для ПОСТРОЕНИЯ правил. TrimTo дописывает
+        // «...» для показа в интерфейсе; правило, собранное по такому тексту,
+        // искало бы три точки, которых в реальном окне нет, и никогда бы не
+        // сработало (заголовки форм Oktell длиннее 40 символов — штатный
+        // сценарий настройки через инспектор выдавал мёртвое правило).
+        public static string Cut(string s, int n)
+        {
+            if (String.IsNullOrEmpty(s)) return "";
+            s = s.Trim();
+            return s.Length <= n ? s : s.Substring(0, n);
+        }
     }
 
     // -------------------------------------------------------------- WindowInfo
@@ -342,7 +354,7 @@ namespace OktellWatch
             WatchRule r = new WatchRule();
             if (!Str.IsEmpty(w.ProcessName)) r.Proc = w.ProcessName.Trim();
             string t = (w.Title == null) ? "" : w.Title.Trim();
-            if (t.Length > 0) r.Title = Str.TrimTo(t, 40);
+            if (t.Length > 0) r.Title = Str.Cut(t, 40);
             if (Str.IsEmpty(r.Title) && !Str.IsEmpty(w.ClassName)) r.Class = w.ClassName.Trim();
             r.Scope = w.IsChild ? "child" : "top";
             return r;
@@ -463,9 +475,22 @@ namespace OktellWatch
                 if (eq <= 0 || cur == null) continue;
                 if (cur != section.ToLowerInvariant()) continue;
                 if (String.Equals(line.Substring(0, eq).Trim(), key, StringComparison.OrdinalIgnoreCase))
-                    return line.Substring(eq + 1).Trim();
+                    return ScalarValue(line.Substring(eq + 1));
             }
             return def;
+        }
+
+        // Значение обычной настройки без хвостового комментария (с 1.2.3.6):
+        // «pollIntervalMs=2000 ; страховка» раньше возвращалось целиком, и
+        // настройка молча подменялась значением по умолчанию (число не
+        // разбиралось, путь к звуку переставал существовать). Секция
+        // [watch] читается через SectionItems без обрезки: в строках rule*
+        // «;» — разделитель полей правила, а не начало комментария.
+        private static string ScalarValue(string v)
+        {
+            int sc = v.IndexOf(';');
+            if (sc >= 0) v = v.Substring(0, sc);
+            return v.Trim();
         }
 
         public int GetInt(string section, string key, int def)
@@ -666,6 +691,10 @@ namespace OktellWatch
 ;  Oktell Watch — настройки (кодировка файла: UTF-8)
 ;  Можно править в Блокноте прямо во время работы:
 ;  программа перечитает файл в течение секунды.
+;  После значения обычной настройки можно писать пояснение
+;  через « ; » (пример: pollIntervalMs=15000 ; раз в 15 секунд);
+;  в строках rule* «;» — разделитель полей: пояснения —
+;  только отдельной строкой выше.
 ;  Правила удобно вести через меню значка — «Диспетчер правил...».
 ; ============================================================
 
@@ -1082,12 +1111,16 @@ folder=system\logs
 
                 POINT p;
                 if (!WinApi.GetCursorPos(out p)) return;
-                Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                // рабочая область того монитора, где курсор (с 1.2.3.6):
+                // PrimaryScreen на мониторе слева/сверху от основного
+                // (отрицательные координаты) утаскивал плашку на другой экран
+                Rectangle wa = Screen.FromPoint(new Point(p.X, p.Y)).WorkingArea;
                 int lx = p.X + 22;
                 if (lx + Width > wa.Right) lx = p.X - Width - 10;
                 int ly = p.Y + 22;
                 if (ly + Height > wa.Bottom) ly = p.Y - Height - 10;
-                Location = new Point(Math.Max(lx, wa.Left), Math.Max(ly, wa.Top));
+                Point np = new Point(Math.Max(lx, wa.Left), Math.Max(ly, wa.Top));
+                if (Location != np) Location = np;   // присваиваем только при изменении
 
                 IntPtr h = WinApi.WindowFromPoint(p);
                 bool ctrl = WinApi.GetAsyncKeyState(0x11) < 0;
@@ -1225,7 +1258,7 @@ folder=system\logs
             if (t.Length > 0)
             {
                 if (sb.Length > 0) sb.Append(';');
-                sb.Append("title:").Append(Str.TrimTo(t, 40));
+                sb.Append("title:").Append(Str.Cut(t, 40));
             }
             else if (c.Length > 0)
             {
@@ -1665,6 +1698,9 @@ PAUSE / RESUME, ERROR.
 НАСТРОЙКА НА ХОДУ
 config.ini можно править в Блокноте прямо во время работы — программа
 перечитает его в течение секунды. Сохраняйте файл в кодировке UTF-8.
+После значения обычной настройки можно писать пояснение через « ; »
+(пример: pollIntervalMs=15000 ; раз в 15 секунд). В строках rule*
+«;» — разделитель полей правила: пояснения — отдельной строкой выше.
 
 ПАУЗА
 Меню значка -> «Пауза наблюдения» — сигналы отключаются, играющий
@@ -2244,6 +2280,7 @@ config.ini можно править в Блокноте прямо во вре�
         private int _lastScanTick = int.MinValue;
         private int _lastCfgTick = int.MinValue;   // троттлинг проверки конфига в hook-пути
         private int _hookCooldownMs = 250;
+        private Timer _tailTimer;                  // «хвост» троттлинга скана (с 1.2.3.6)
         private int[] _matchCounts = new int[0];
 
         // -------------------------------------- portable-компоновка (system\)
@@ -2297,6 +2334,7 @@ config.ini можно править в Блокноте прямо во вре�
 
             InstallHook();
             ApplyScanPolicy();
+            EnsureAutostartPath();   // путь автозапуска мог остаться от старой папки
 
             _tray = new NotifyIcon();
             _tray.Icon = AppIcon;
@@ -2400,20 +2438,64 @@ config.ini можно править в Блокноте прямо во вре�
             // показа до первого страховочного опроса (15 с) проглатывались.
             now = Environment.TickCount;
             if (_lastScanTick != int.MinValue &&
-                unchecked(now - _lastScanTick) < _hookCooldownMs) return;
+                unchecked(now - _lastScanTick) < _hookCooldownMs)
+            {
+                RequestScan();   // событие не теряется: скан пройдёт после кулдауна
+                return;
+            }
             _lastScanTick = now;
             try { Scan(); }
             catch (Exception ex) { Log.Write("ERROR", "Scan(hook): " + ex.Message); }
+        }
+
+        // «Хвост» троттлинга (с 1.2.3.6). Показ формы почти всегда идёт
+        // пачкой событий: окно, элементы, надписи. Первое событие запускает
+        // скан, а события следующих hookCooldownMs мс раньше отбрасывались
+        // безвозвратно — надпись, появившаяся в конце пачки, попадала в
+        // скан только со страховочным опросом, до 15 секунд спустя. Теперь
+        // каждое событие в кулдауне перезапускает короткий таймер: скан
+        // проходит через hookCooldownMs после ПОСЛЕДНЕГО события серии.
+        private void RequestScan()
+        {
+            if (_tailTimer == null)
+            {
+                _tailTimer = new Timer();
+                _tailTimer.Tick += delegate
+                {
+                    _tailTimer.Stop();
+                    if (_paused || _captureHold) return;
+                    try { Scan(); }
+                    catch (Exception ex) { Log.Write("ERROR", "Scan(tail): " + ex.Message); }
+                };
+            }
+            _tailTimer.Interval = _hookCooldownMs;
+            _tailTimer.Start();   // перезапуск: отсчёт от последнего события серии
         }
 
         // Полный опрос — страховка: при работающих хуках не чаще 15 секунд
         private void ApplyScanPolicy()
         {
             _hookCooldownMs = Clamp(_settings.HookCooldownMs, 50, 5000);
+            UpdateTimerInterval();
+            Collector.SetCacheTtl(_settings.ProcCacheSec);
+        }
+
+        // Интервал таймера опроса (с 1.2.3.6). Пока есть наблюдаемые окна
+        // и включён повтор сигнала, таймер тикает в такт repeatEverySec:
+        // раньше период повтора был привязан к опросу, и при работающих
+        // хуках (опрос раз в 15 секунд) «повтор каждые 5 сек» соблюдался
+        // только по случаю — когда оператор отошёл и событий нет, сигнал
+        // повторялся втрое реже настроенного, а при активной мыши — чаще.
+        private void UpdateTimerInterval()
+        {
             int poll = Clamp(_settings.PollIntervalMs, 250, 60000);
             if (_settings.UseHooks && _hook != IntPtr.Zero && poll < 15000) poll = 15000;
-            _timer.Interval = poll;
-            Collector.SetCacheTtl(_settings.ProcCacheSec);
+            if (_tracked.Count > 0 && _settings.RepeatAlert)
+            {
+                int rep = Clamp(_settings.RepeatEverySec, 1, 600) * 1000;
+                if (rep < poll) poll = rep;   // есть цель — тикаем в такт повтору
+            }
+            if (_timer.Interval != poll) _timer.Interval = poll;
         }
 
         private void ApplyLogSettings()
@@ -2506,6 +2588,7 @@ config.ini можно править в Блокноте прямо во вре�
             Log.Write(_paused ? "PAUSE" : "RESUME",
                 _paused ? "наблюдение приостановлено оператором" : "наблюдение возобновлено");
             UpdateStatus();
+            UpdateTimerInterval();
         }
 
         private void OpenLogs()
@@ -2526,7 +2609,10 @@ config.ini можно править в Блокноте прямо во вре�
         private void ExitApp()
         {
             Log.Write("STOP", "завершение работы");
+            try { StopSound("выход"); } catch { }
             UninstallHook();
+            try { _timer.Stop(); } catch { }
+            if (_tailTimer != null) { try { _tailTimer.Stop(); _tailTimer.Dispose(); } catch { } }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
             Application.Exit();
         }
@@ -2552,6 +2638,26 @@ config.ini можно править в Блокноте прямо во вре�
                 if (on) k.SetValue(RunValueName, "\"" + Application.ExecutablePath + "\"");
                 else k.DeleteValue(RunValueName, false);
             }
+        }
+
+        // Программу могли перенести в другую папку: в реестре остался путь
+        // к старой, галочка «Автозапуск» при этом стоит, но автозапуск
+        // битый (с 1.2.3.6). При старте сравниваем и молча обновляем.
+        private void EnsureAutostartPath()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    if (k == null || k.GetValue(RunValueName) == null) return;
+                    string cur = Convert.ToString(k.GetValue(RunValueName));
+                    string want = "\"" + Application.ExecutablePath + "\"";
+                    if (String.Equals(cur, want, StringComparison.OrdinalIgnoreCase)) return;
+                    k.SetValue(RunValueName, want);
+                    Log.Write("CONFIG", "автозапуск: в реестре был путь к старой папке — обновлён на " + want);
+                }
+            }
+            catch { }
         }
 
         // --------------------------------------------------- сканирование
@@ -2589,6 +2695,15 @@ config.ini можно править в Блокноте прямо во вре�
                 Log.Write("DETECTED", (kv.Value.IsChild ? "[внутр. окно] " : "") + kv.Value.Describe());
             }
 
+            // исчезнувшие = обработанные: убираем ДО оповещения (с 1.2.3.6),
+            // чтобы окно, закрытое между сканами, не успело получить лишний
+            // сигнал и запись RE-ALERT в журнал
+            List<long> gone = new List<long>();
+            foreach (KeyValuePair<long, Track> kv in _tracked)
+                if (!found.ContainsKey(kv.Key)) gone.Add(kv.Key);
+            for (int i = 0; i < gone.Count; i++)
+                CloseTrack(gone[i], "окно исчезло (обработано)");
+
             // оповещение: новые и повторные
             DateTime now = DateTime.Now;
             foreach (KeyValuePair<long, Track> kv in _tracked)
@@ -2605,14 +2720,8 @@ config.ini можно править в Блокноте прямо во вре�
                 }
             }
 
-            // исчезнувшие = обработанные
-            List<long> gone = new List<long>();
-            foreach (KeyValuePair<long, Track> kv in _tracked)
-                if (!found.ContainsKey(kv.Key)) gone.Add(kv.Key);
-            for (int i = 0; i < gone.Count; i++)
-                CloseTrack(gone[i], "окно исчезло (обработано)");
-
             UpdateStatus();
+            UpdateTimerInterval();   // цели появились/исчезли — интервал в такт повтору
         }
 
         // Закрытие трека. Если наблюдаемых окон не осталось — звук гаснет
@@ -2628,6 +2737,7 @@ config.ini можно править в Блокноте прямо во вре�
                                 t.Info.Describe());
             if (_tracked.Count == 0) StopSound("наблюдаемых окон не осталось");
             UpdateStatus();
+            UpdateTimerInterval();   // целей не осталось — возвращаем обычный интервал опроса
         }
 
         // Немедленная остановка звука: останавливаем наш плеер и (на случай
