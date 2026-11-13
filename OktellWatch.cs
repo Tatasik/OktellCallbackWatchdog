@@ -54,9 +54,9 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: System.Reflection.AssemblyCompany("Tatasik — github.com/Tatasik")]
 [assembly: System.Reflection.AssemblyCopyright("© 2026 Tatasik. Лицензия MIT.")]
 [assembly: System.Reflection.AssemblyTrademark("")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.3")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.3.3")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.3")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.4")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.3.4")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.3.4")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 namespace OktellWatch
@@ -1587,15 +1587,18 @@ folder=system\logs
    ВНИМАНИЕ: не кликайте мышью по форме — клик пройдёт в окно под
    курсором и может нажать кнопку («Принять» / «Удалить»).
 5. Проверьте данные окна и нажмите «Добавить в наблюдение...» —
-   откроется редактор правила (поля: процесс, заголовок, класс).
-   Правило сохранится и заработает сразу — перезапуск не нужен.
+   откроется редактор правила (поля: процесс, заголовок, класс,
+   исключения). Правило сохранится и заработает сразу — перезапуск
+   не нужен.
 
 ДИСПЕТЧЕР ПРАВИЛ (править config.ini не нужно!)
 Меню значка в трее -> «Диспетчер правил...».
 •  Галочка = правило активно. Сняли — правило отключено (остаётся
    в config.ini с пометкой off:true).
 •  «Добавить» / «Изменить» — редактор с полями: процесс, заголовок,
-   класс окна, где искать. Синтаксис помнить не нужно.
+   класс окна, исключения («НЕТ текста/класса»), где искать.
+   Признак и исключение — разные поля, их можно сочетать:
+   заголовок ~«зарезерв» + в окне НЕТ ~«дозвон».
 •  «Удалить» — убрать правило совсем (с подтверждением).
 •  Столбец «Окон сейчас» показывает, сколько окон ловит каждое
    правило прямо сейчас — сразу видно слишком широкое правило.
@@ -1688,15 +1691,17 @@ config.ini можно править в Блокноте прямо во вре�
     }
 
     // ------------------------------------------------------------- RuleEditForm
-    // Понятный редактор правила: поля вместо синтаксиса config.ini
+    // Понятный редактор правила: поля вместо синтаксиса config.ini.
+    // Признаки и исключения — отдельные поля: признак и исключение можно
+    // сочетать (например, «заголовок ~зарезерв» + «в окне НЕТ дозвон»).
     internal class RuleEditForm : Form
     {
         private readonly TextBox _tbProc;
         private readonly TextBox _tbTitle;
         private readonly TextBox _tbClass;
-        private readonly CheckBox _ckNotProc;
-        private readonly CheckBox _ckNotTitle;
-        private readonly CheckBox _ckNotClass;
+        private readonly TextBox _tbNotProc;
+        private readonly TextBox _tbNotTitle;
+        private readonly TextBox _tbNotClass;
         private readonly ComboBox _cbScope;
         private readonly Label _lblPreview;
         private readonly bool _wasEnabled;
@@ -1719,15 +1724,26 @@ config.ini можно править в Блокноте прямо во вре�
             // каком DPI (исправлено в 1.1.1). Примеры показываются внутри
             // пустых полей — см. OnShown.
             int y = 14;
+
+            // Признаки — то, что ДОЛЖНО найтись в окне (хотя бы одно поле)
+            AddSection("Признаки окна (хотя бы один):", ref y);
             _tbProc = AddField("Процесс содержит:",
-                seed == null ? "" : Clean(seed.Proc),
-                seed != null && !Str.IsEmpty(seed.NotProc), ref y, out _ckNotProc);
+                seed == null ? "" : Clean(seed.Proc), ref y);
             _tbTitle = AddField("Заголовок окна содержит:",
-                seed == null ? "" : Clean(seed.Title),
-                seed != null && !Str.IsEmpty(seed.NotTitle), ref y, out _ckNotTitle);
+                seed == null ? "" : Clean(seed.Title), ref y);
             _tbClass = AddField("Класс окна содержит:",
-                seed == null ? "" : Clean(seed.Class),
-                seed != null && !Str.IsEmpty(seed.NotClass), ref y, out _ckNotClass);
+                seed == null ? "" : Clean(seed.Class), ref y);
+
+            // Исключения — то, чего в окне быть НЕ должно; у каждого условия
+            // своё поле, поэтому признак и исключение можно сочетать:
+            // заголовок ~«зарезерв» + в окне НЕТ «дозвон» (с 1.2.3.4)
+            AddSection("Исключения — правило молчит, если найдётся:", ref y);
+            _tbNotProc = AddField("Процесс НЕ содержит:",
+                seed == null ? "" : Clean(seed.NotProc), ref y);
+            _tbNotTitle = AddField("В окне НЕТ текста:",
+                seed == null ? "" : Clean(seed.NotTitle), ref y);
+            _tbNotClass = AddField("Класса НЕТ в окне:",
+                seed == null ? "" : Clean(seed.NotClass), ref y);
 
             Label l4 = new Label();
             l4.Text = "Где искать:";
@@ -1778,28 +1794,32 @@ config.ini можно править в Блокноте прямо во вре�
             _tbProc.TextChanged += delegate { UpdatePreview(); };
             _tbTitle.TextChanged += delegate { UpdatePreview(); };
             _tbClass.TextChanged += delegate { UpdatePreview(); };
+            _tbNotProc.TextChanged += delegate { UpdatePreview(); };
+            _tbNotTitle.TextChanged += delegate { UpdatePreview(); };
+            _tbNotClass.TextChanged += delegate { UpdatePreview(); };
             UpdatePreview();
         }
 
-        // Поле ввода: подпись над полем + галочка «не содержит» (исключение)
-        private TextBox AddField(string caption, string value, bool notValue,
-                                 ref int y, out CheckBox neg)
+        // Подпись раздела серым — объединяет поля в группы признаков/исключений
+        private void AddSection(string caption, ref int y)
+        {
+            Label s = new Label();
+            s.Text = caption;
+            s.AutoSize = true;
+            s.ForeColor = SystemColors.GrayText;
+            s.Location = new Point(14, y + 2);
+            Controls.Add(s);
+            y += s.Height + 6;
+        }
+
+        // Поле ввода: подпись над полем (не налезает на поле ни при каком DPI)
+        private TextBox AddField(string caption, string value, ref int y)
         {
             Label l = new Label();
             l.Text = caption;
             l.Location = new Point(14, y);
             l.AutoSize = true;
             Controls.Add(l);
-
-            // галочка-инверсия: превращает поле в исключение (title!: и т.п.)
-            neg = new CheckBox();
-            neg.Text = "не содержит";
-            neg.AutoSize = true;
-            neg.Checked = notValue;
-            int lw = TextRenderer.MeasureText(caption, Font).Width;
-            neg.Location = new Point(14 + lw + 18, y - 4);
-            neg.CheckedChanged += delegate { UpdatePreview(); };
-            Controls.Add(neg);
 
             TextBox tb = new TextBox();
             tb.Text = value;
@@ -1818,6 +1838,9 @@ config.ini можно править в Блокноте прямо во вре�
             WinApi.SetCue(_tbProc, "например: oktell");
             WinApi.SetCue(_tbTitle, "например: перезвон");
             WinApi.SetCue(_tbClass, "необязательно, можно оставить пустым");
+            WinApi.SetCue(_tbNotProc, "например: тест");
+            WinApi.SetCue(_tbNotTitle, "например: дозвон");
+            WinApi.SetCue(_tbNotClass, "необязательно");
         }
 
         // Точка с запятой — разделитель полей правила, в значениях её быть не должно
@@ -1842,22 +1865,20 @@ config.ini можно править в Блокноте прямо во вре�
             string proc = Clean(_tbProc.Text);
             string title = Clean(_tbTitle.Text);
             string cls = Clean(_tbClass.Text);
+            string notProc = Clean(_tbNotProc.Text);
+            string notTitle = Clean(_tbNotTitle.Text);
+            string notClass = Clean(_tbNotClass.Text);
+            // хотя бы один ОБЫЧНЫЙ признак обязателен: правило только из
+            // исключений ловило бы вообще все окна
             if (proc.Length == 0 && title.Length == 0 && cls.Length == 0) return null;
-            // хотя бы одно поле должно быть ОБЫЧНЫМ признаком, а не исключением:
-            // правило только из «не содержит» ловило бы вообще все окна
-            bool anyPositive =
-                (proc.Length > 0 && !_ckNotProc.Checked) ||
-                (title.Length > 0 && !_ckNotTitle.Checked) ||
-                (cls.Length > 0 && !_ckNotClass.Checked);
-            if (!anyPositive) return null;
             StringBuilder sb = new StringBuilder();
             if (!_wasEnabled) sb.Append("off:true;");
-            if (proc.Length > 0)
-                sb.Append(_ckNotProc.Checked ? "proc!:" : "proc:").Append(proc).Append(';');
-            if (title.Length > 0)
-                sb.Append(_ckNotTitle.Checked ? "title!:" : "title:").Append(title).Append(';');
-            if (cls.Length > 0)
-                sb.Append(_ckNotClass.Checked ? "class!:" : "class:").Append(cls).Append(';');
+            if (proc.Length > 0) sb.Append("proc:").Append(proc).Append(';');
+            if (title.Length > 0) sb.Append("title:").Append(title).Append(';');
+            if (cls.Length > 0) sb.Append("class:").Append(cls).Append(';');
+            if (notProc.Length > 0) sb.Append("proc!:").Append(notProc).Append(';');
+            if (notTitle.Length > 0) sb.Append("title!:").Append(notTitle).Append(';');
+            if (notClass.Length > 0) sb.Append("class!:").Append(notClass).Append(';');
             sb.Append("scope:").Append(ScopeValue());
             return WatchRule.Parse(sb.ToString());
         }
@@ -1876,7 +1897,7 @@ config.ini можно править в Блокноте прямо во вре�
             if (r == null)
             {
                 MessageBox.Show("Укажите хотя бы один признак: процесс, заголовок или класс окна.\n" +
-                        "Исключения («не содержит») только сужают правило — сами по себе признаком не являются.",
+                        "Исключения («НЕТ текста/класса») только сужают правило — сами по себе признаком не являются.",
                     "Oktell Watch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
